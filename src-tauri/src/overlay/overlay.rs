@@ -1,3 +1,5 @@
+use crate::mosaic::Mosaic;
+
 pub fn apply_mosaic(mosaic: Mosaic) {
 
 }

@@ -1,8 +1,14 @@
+use log::{error, info, warn};
+use tauri::{AppHandle, Manager};
+use windows::Win32::{Foundation::HWND, Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE}, UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT}};
+
+use crate::monitor::MonitorInfo;
+
 pub mod overlay;
 
 pub fn create_overlay_window(
     app_handle: &AppHandle,
-    monitor: &monitor::MonitorInfo,
+    monitor: &MonitorInfo,
 ) {
     // 如果已存在，先关闭
     if let Some(existing_window) = app_handle.get_webview_window("overlay") {
@@ -21,7 +27,7 @@ pub fn create_overlay_window(
     let position_y = monitor.y;
     info!(
         "[create_overlay_window] create overlay window {}: position({}, {}), size{}x{}",
-        window_label, position_x, position_y, width, height
+        "overlay", position_x, position_y, width, height
     );
     let window = tauri::WebviewWindowBuilder::new(
         app_handle,
@@ -63,12 +69,7 @@ pub fn create_overlay_window(
                 &preference as *const _ as _,
                 std::mem::size_of_val(&preference) as u32,
             );
-            if !config::get_config().unwrap().system.debug_mode {
-                set_window_transparent_style(&window, hwnd_raw as i64);
-            }
-        }
-        if let Ok(mut handles) = OVERLAY_HANDLES_STORAGE.lock() {
-            handles.insert(window_label.to_string(), hwnd_raw as i64);
+            set_window_transparent_style(&window, hwnd_raw as i64);
         }
     }
 }
