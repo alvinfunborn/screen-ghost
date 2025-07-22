@@ -1,13 +1,20 @@
 use log::{error, info};
-use tauri::{Manager, WindowEvent};
+use tauri::{AppHandle, Manager, WindowEvent, WebviewWindow};
 use tauri_plugin_autostart::MacosLauncher;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 
-pub mod dispatcher;
 mod tray;
 mod autostart;
 mod panic_handler;
 mod app_builder;
+mod app_state;
+pub use app_state::AppState;
+
+use crate::{system, utils::logger};
+
+const LOG_LEVEL: &str = "debug";
 
 pub fn run() {
     // 自动切换到 exe 所在目录, 为了解决windows自动启动时workding directory读取不到配置文件的问题
@@ -23,8 +30,8 @@ pub fn run() {
     // let config = config::get_config().unwrap();
     // let config_for_manage = config.clone();
 
-    // // Initialize logger
-    // let _ = init_logger(config.system.logging_level.clone());
+    // Initialize logger
+    let _ = logger::init_logger(LOG_LEVEL.to_string());
     
     // Initialize COM
     unsafe {
@@ -50,6 +57,14 @@ pub fn run() {
 
         // Setup main window
         let main_window = app_handle.get_webview_window("main").unwrap();
+
+        // 设置全局App实例
+        let app = AppState {
+            handle: app_handle.clone(),
+            main_window: main_window.clone(),
+        };
+        AppState::set_global(app).expect("Failed to set global app instance");
+        info!("[✓] global app instance set");
 
         // // Handle window visibility
         // if config.system.start_in_tray {

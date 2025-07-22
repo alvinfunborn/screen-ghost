@@ -1,9 +1,13 @@
 use crate::mosaic::Mosaic;
 
-pub fn apply_mosaic(mosaic: Mosaic) {
+pub fn apply_mosaic(mosaics: Vec<Mosaic>) {
 
 }
 
-pub fn remove_mosaic(mosaic: Mosaic) {
+pub fn hide_mosaic() {
 
+}
+
+pub fn show_mosaic() {
+    
 }

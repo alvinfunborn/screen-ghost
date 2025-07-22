@@ -1,6 +1,8 @@
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 
+use crate::api::command;
+
 pub fn create_app_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -16,6 +18,8 @@ pub fn create_app_builder() -> tauri::Builder<tauri::Wry> {
                 .set_focus();
         }))
         .invoke_handler(tauri::generate_handler![
+            command::get_monitors,
+            command::set_working_monitor,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

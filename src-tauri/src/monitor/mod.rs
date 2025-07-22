@@ -1,12 +1,13 @@
 pub mod monitor;
-pub use monitor::MonitorInfo;
+pub use monitor::{MonitorInfo, Image};
 
 use log::{error, info};
 use tauri::WebviewWindow;
+use crate::app::AppState;
 
 // 获取所有显示器信息，按照x坐标排序
-pub fn list_monitors(window: &WebviewWindow) -> Result<Vec<MonitorInfo>, String> {
-    let monitors = window.available_monitors();
+pub fn list_monitors() -> Result<Vec<MonitorInfo>, String> {
+    let monitors = AppState::get_main_window().unwrap().available_monitors();
     if let Err(e) = monitors {
         panic!("[list_monitors] get available monitors failed: {}", e);
     }

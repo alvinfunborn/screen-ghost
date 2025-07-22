@@ -1,17 +1,16 @@
 use log::{error, info, warn};
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
 use windows::Win32::{Foundation::HWND, Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE}, UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT}};
 
-use crate::monitor::MonitorInfo;
+use crate::{app::AppState, monitor::MonitorInfo};
 
 pub mod overlay;
 
 pub fn create_overlay_window(
-    app_handle: &AppHandle,
     monitor: &MonitorInfo,
 ) {
     // 如果已存在，先关闭
-    if let Some(existing_window) = app_handle.get_webview_window("overlay") {
+    if let Some(existing_window) = AppState::get_global().unwrap().handle.get_webview_window("overlay") {
         warn!("[create_overlay_window] close existing window: {}", "overlay");
         if let Err(e) = existing_window.close() {
             error!(
@@ -30,7 +29,7 @@ pub fn create_overlay_window(
         "overlay", position_x, position_y, width, height
     );
     let window = tauri::WebviewWindowBuilder::new(
-        app_handle,
+        &AppState::get_global().unwrap().handle,
         "overlay",
         tauri::WebviewUrl::App(format!("overlay.html?window_label={}", "overlay").into()),
     )

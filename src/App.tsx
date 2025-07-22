@@ -1,50 +1,173 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+interface MonitorInfo {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale_factor: number;
+}
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+interface Image {
+  width: number;
+  height: number;
+  data: number[]; // BGRA format
+}
+
+function App() {
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
+  const [selectedMonitor, setSelectedMonitor] = useState<MonitorInfo | null>(null);
+  const [currentImage, setCurrentImage] = useState<Image | null>(null);
+
+  // Load monitors on component mount
+  useEffect(() => {
+    loadMonitors();
+  }, []);
+
+  // Listen for image events
+  useEffect(() => {
+    if (selectedMonitor) {
+      console.log("Setting up image event listener for monitor:", selectedMonitor.id);
+      
+      const unlisten = listen<Image>("image", (event) => {
+        console.log("Received image:", event.payload);
+        setCurrentImage(event.payload);
+      });
+
+      return () => {
+        console.log("Cleaning up image event listener");
+        unlisten.then(fn => fn()).catch(error => {
+          console.error("Failed to cleanup event listener:", error);
+        });
+      };
+    }
+  }, [selectedMonitor]);
+
+  const loadMonitors = async () => {
+    try {
+      const monitorList = await invoke<MonitorInfo[]>("get_monitors");
+      setMonitors(monitorList);
+      console.log("Loaded monitors:", monitorList);
+    } catch (error) {
+      console.error("Failed to load monitors:", error);
+    }
+  };
+
+  const selectMonitor = async (monitor: MonitorInfo) => {
+    try {
+      await invoke("set_working_monitor", { monitor });
+      setSelectedMonitor(monitor);
+      console.log("Selected monitor:", monitor);
+    } catch (error) {
+      console.error("Failed to select monitor:", error);
+    }
+  };
+
+  const convertImageDataToCanvas = (image: Image): string => {
+    try {
+      console.log("Converting image data:", image.width, "x", image.height, "data length:", image.data.length);
+      
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d');
+      
+      if (!ctx) {
+        console.error("Failed to get canvas context");
+        return '';
+      }
+
+      const imageData = ctx.createImageData(image.width, image.height);
+      const data = imageData.data;
+
+      // 验证数据长度
+      const expectedLength = image.width * image.height * 4;
+      if (image.data.length !== expectedLength) {
+        console.error("Image data length mismatch:", image.data.length, "expected:", expectedLength);
+        return '';
+      }
+
+      // Convert BGRA to RGBA
+      for (let i = 0; i < image.data.length; i += 4) {
+        data[i] = image.data[i + 2];     // R (from B)
+        data[i + 1] = image.data[i + 1]; // G
+        data[i + 2] = image.data[i];     // B (from R)
+        data[i + 3] = image.data[i + 3]; // A
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+      const dataUrl = canvas.toDataURL();
+      console.log("Image conversion completed, data URL length:", dataUrl.length);
+      return dataUrl;
+    } catch (error) {
+      console.error("Error converting image data:", error);
+      return '';
+    }
+  };
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <div className="app">
+      <header className="app-header">
+        <h1>Screen Ghost - Monitor Demo</h1>
+      </header>
 
-      <div className="row">
-        <a href="https://vitejs.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://reactjs.org" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+      <main className="app-main">
+        <section className="monitor-section">
+          <h2>Available Monitors</h2>
+          <div className="monitor-grid">
+            {monitors.map((monitor) => (
+              <div
+                key={monitor.id}
+                className={`monitor-card ${selectedMonitor?.id === monitor.id ? 'selected' : ''}`}
+                onClick={() => selectMonitor(monitor)}
+              >
+                <h3>Monitor {monitor.id}</h3>
+                <div className="monitor-info">
+                  <p><strong>Position:</strong> ({monitor.x}, {monitor.y})</p>
+                  <p><strong>Size:</strong> {monitor.width} × {monitor.height}</p>
+                  <p><strong>Scale:</strong> {monitor.scale_factor}</p>
+                </div>
+                {selectedMonitor?.id === monitor.id && (
+                  <div className="selected-indicator">✓ Selected</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+        <section className="image-section">
+          <h2>Live Image Display</h2>
+          {selectedMonitor ? (
+            <div className="image-container">
+              {currentImage ? (
+                <div className="image-info">
+                  <p>Receiving live image from Monitor {selectedMonitor.id}</p>
+                  <p>Image size: {currentImage.width} × {currentImage.height}</p>
+                  <img
+                    src={convertImageDataToCanvas(currentImage)}
+                    alt="Live monitor capture"
+                    className="live-image"
+                  />
+                </div>
+              ) : (
+                <div className="waiting-message">
+                  <p>Waiting for image data from Monitor {selectedMonitor.id}...</p>
+                  <div className="loading-spinner"></div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="no-monitor-selected">
+              <p>Please select a monitor to start receiving live images</p>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
   );
 }
 
