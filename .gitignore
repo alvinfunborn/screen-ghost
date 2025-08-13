@@ -36,3 +36,4 @@ build/
 **/.cursor
 **/.history
 **/node_modules
+**/.cursorindexingignore

@@ -82,3 +82,7 @@ src-tauri/
 ## License
 
 MIT License
+
+
+### tips
+本地安装了llvm, opencv

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Overlay</title>
+    <style>
+        body {
+            background: rgba(0, 123, 255, 0.1);
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            pointer-events: none;
+            width: 100vw;
+            height: 100vh;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+        
+        .mosaic {
+            position: absolute;
+            background: repeating-conic-gradient(
+                #ff0000 0deg 90deg,
+                #00ff00 90deg 180deg
+            ) 0 0 / 10px 10px;
+            pointer-events: none;
+            z-index: 9999;
+            border: 1px solid #ffffff;
+            opacity: 0.8;
+        }
+        
+        #test {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px;
+            font-size: 12px;
+            z-index: 10000;
+        }
+        
+        #mosaic-container {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            z-index: 9998;
+        }
+        
+        .debug-info {
+            position: fixed;
+            top: 40px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px;
+            font-size: 10px;
+            z-index: 10000;
+            max-width: 300px;
+        }
+    </style>
+</head>
+<body>
+    <div id="test">Overlay Window Test</div>
+    <div id="debug-info" class="debug-info">Debug Info</div>
+    <div id="mosaic-container"></div>
+    
+    <script type="module">
+        import { invoke } from "@tauri-apps/api/core"; // v2
+        import { listen } from "@tauri-apps/api/event";
+        import { getCurrentWebview } from "@tauri-apps/api/webview";
+        
+        // 使用导入的 API 直接获取当前窗口
+        const currentWindow = getCurrentWebview();
+        
+        console.log("[Overlay] Simple overlay loaded successfully");
+        document.getElementById('test').innerHTML = 'Overlay loaded at: ' + new Date().toLocaleTimeString();
+        
+        // 马赛克管理
+        let mosaics = [];
+        const mosaicContainer = document.getElementById('mosaic-container');
+        const debugInfo = document.getElementById('debug-info');
+        
+        // 动态DPI缩放因子
+        let scaleFactor = 1.0; // 默认值
+        
+        // 更新调试信息
+        function updateDebugInfo(message) {
+            debugInfo.innerHTML = message;
+            console.log('[Debug]', message);
+        }
+        
+        // 清除所有马赛克
+        function clearMosaics() {
+            mosaicContainer.innerHTML = '';
+            mosaics = [];
+            updateDebugInfo('Cleared all mosaics');
+        }
+        
+        // 显示所有马赛克
+        function showMosaics() {
+            mosaics.forEach(mosaic => {
+                mosaic.style.display = 'block';
+            });
+            updateDebugInfo(`Showing ${mosaics.length} mosaics`);
+        }
+        
+        // 隐藏所有马赛克
+        function hideMosaics() {
+            mosaics.forEach(mosaic => {
+                mosaic.style.display = 'none';
+            });
+            updateDebugInfo(`Hiding ${mosaics.length} mosaics`);
+        }
+        
+        // 应用马赛克
+        function applyMosaics(payload) {
+            clearMosaics();
+            
+            if (!payload || !payload.mosaics || !Array.isArray(payload.mosaics)) {
+                updateDebugInfo('Error: invalid payload format');
+                return;
+            }
+            
+            // 更新scale_factor
+            if (payload.scale_factor) {
+                scaleFactor = payload.scale_factor;
+                console.log(`[Overlay] Updated scale_factor to: ${scaleFactor}`);
+            }
+            
+            const rects = payload.mosaics;
+            
+            rects.forEach((rect, index) => {
+                const mosaic = document.createElement('div');
+                mosaic.className = 'mosaic';
+                
+                // 将物理像素坐标转换为逻辑像素坐标
+                const logicalX = rect.x / scaleFactor;
+                const logicalY = rect.y / scaleFactor;
+                const logicalWidth = rect.width / scaleFactor;
+                const logicalHeight = rect.height / scaleFactor;
+                
+                mosaic.style.left = logicalX + 'px';
+                mosaic.style.top = logicalY + 'px';
+                mosaic.style.width = logicalWidth + 'px';
+                mosaic.style.height = logicalHeight + 'px';
+                
+                // 添加调试信息到马赛克元素
+                mosaic.title = `Mosaic ${index}: ${logicalX.toFixed(1)},${logicalY.toFixed(1)} ${logicalWidth.toFixed(1)}x${logicalHeight.toFixed(1)} (physical: ${rect.x},${rect.y} ${rect.width}x${rect.height})`;
+                
+                mosaicContainer.appendChild(mosaic);
+                mosaics.push(mosaic);
+                
+                console.log(`[Overlay] Created mosaic ${index}:`, rect, `-> logical: ${logicalX.toFixed(1)},${logicalY.toFixed(1)} ${logicalWidth.toFixed(1)}x${logicalHeight.toFixed(1)}`);
+            });
+            
+            updateDebugInfo(`Applied ${rects.length} mosaics (scale: ${scaleFactor})`);
+            console.log(`[Overlay] Applied ${rects.length} mosaics with scale_factor: ${scaleFactor}`);
+        }
+        
+        // 主初始化函数
+        async function initialize() {
+            try {
+                updateDebugInfo('Initializing...');
+                
+                // 设置 apply-mosaic 事件监听
+                const unlistenApply = await currentWindow.listen('apply-mosaic', (event) => {
+                    console.log('[Overlay] Received apply-mosaic event:', event.payload);
+                    updateDebugInfo(`Received apply-mosaic: ${event.payload?.length || 0} items`);
+                    applyMosaics(event.payload);
+                });
+                console.log('[Overlay] apply-mosaic listener set');
+                
+                // 设置 show-mosaic 事件监听
+                const unlistenShow = await currentWindow.listen('show-mosaic', (event) => {
+                    console.log('[Overlay] Received show-mosaic event');
+                    updateDebugInfo('Received show-mosaic event');
+                    showMosaics();
+                });
+                console.log('[Overlay] show-mosaic listener set');
+                
+                // 设置 hide-mosaic 事件监听
+                const unlistenHide = await currentWindow.listen('hide-mosaic', (event) => {
+                    console.log('[Overlay] Received hide-mosaic event');
+                    updateDebugInfo('Received hide-mosaic event');
+                    hideMosaics();
+                });
+                console.log('[Overlay] hide-mosaic listener set');
+                
+                // 设置清理函数
+                window.addEventListener('unload', () => {
+                    try {
+                        unlistenApply();
+                        unlistenShow();
+                        unlistenHide();
+                        console.log('[Overlay] listeners cleaned');
+                    } catch (error) {
+                        console.error('[Overlay] failed to clean listeners:', error);
+                    }
+                });
+                
+                updateDebugInfo('Event listeners setup completed');
+                console.log('[Overlay] Event listeners setup completed');
+            } catch (error) {
+                updateDebugInfo(`Error: ${error.message}`);
+                console.error('[Overlay] Failed to setup event listeners:', error);
+            }
+        }
+        
+        // 等待 DOM 加载完成后再初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            updateDebugInfo('DOM loaded, starting initialization...');
+            initialize().catch(error => {
+                updateDebugInfo(`Initialize failed: ${error.message}`);
+                console.error('[Overlay] initialize failed:', error);
+            });
+        });
+        
+        // 阻止所有鼠标和键盘事件
+        function preventAllEvents(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            return false;
+        }
+        
+        // 添加全局事件监听器来阻止所有交互事件
+        const eventsToPrevent = [
+            'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu',
+            'mousemove', 'mouseenter', 'mouseleave', 'mouseover', 'mouseout',
+            'keydown', 'keyup', 'keypress',
+            'touchstart', 'touchend', 'touchmove',
+            'wheel', 'scroll'
+        ];
+        
+        eventsToPrevent.forEach(eventType => {
+            document.addEventListener(eventType, preventAllEvents, true);
+            window.addEventListener(eventType, preventAllEvents, true);
+        });
+        
+        console.log('[Overlay] Event blocking enabled for all interaction events');
+        
+        // 错误处理
+        window.addEventListener('error', (event) => {
+            updateDebugInfo(`Global error: ${event.error}`);
+            console.error('[Overlay] caught global error:', event.error);
+        });
+        
+        window.addEventListener('unhandledrejection', (event) => {
+            updateDebugInfo(`Unhandled rejection: ${event.reason}`);
+            console.error('[Overlay] caught unhandled rejection:', event.reason);
+        });
+    </script>
+</body>
+</html> 

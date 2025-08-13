@@ -12,7 +12,7 @@ mod app_builder;
 mod app_state;
 pub use app_state::AppState;
 
-use crate::{system, utils::logger};
+use crate::{system, utils::logger, ai::face_detect};
 
 const LOG_LEVEL: &str = "debug";
 
@@ -89,6 +89,13 @@ pub fn run() {
         // set autostart
         autostart::set_auto_start(&app_handle).expect("Failed to setup auto start");
         info!("[✓] auto start setup");
+
+        // Initialize Python environment for face detection
+        if let Err(e) = face_detect::initialize_python_environment_with_app_handle(&app_handle) {
+            error!("[✗] Failed to initialize Python environment: {}", e);
+        } else {
+            info!("[✓] Python environment initialized for face detection");
+        }
 
         info!("=== application initialized ===");
         Ok(())

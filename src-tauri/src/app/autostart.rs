@@ -2,7 +2,7 @@ use log::info;
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
-const AUTO_START: bool = true;
+const AUTO_START: bool = false;
 
 pub fn set_auto_start(
     app_handle: &AppHandle,

@@ -6,7 +6,12 @@ pub fn get_monitors() -> Vec<MonitorInfo> {
 }
 
 #[tauri::command]
-pub fn set_working_monitor(monitor: MonitorInfo) {
-    monitoring::set_working_monitor(monitor);
+pub async fn set_working_monitor(monitor: MonitorInfo) {
+    monitoring::set_working_monitor(monitor).await;
 }
 
+#[tauri::command]
+pub fn stop_monitoring() {
+    // 停止监控
+    monitoring::stop_monitoring();
+}

@@ -13,9 +13,14 @@ pub struct MonitorState {
 impl MonitorState {
 
     /// 设置全局实例
-    pub fn set_working(monitor: MonitorInfo) -> Result<(), Box<dyn std::error::Error>> {
-        let mut guard = MONITOR_STATE.lock().map_err(|e| format!("Failed to lock app mutex: {}", e))?;
-        *guard = Some(MonitorState { working_monitor: monitor });
+    pub fn set_working(monitor: Option<MonitorInfo>) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(monitor) = monitor {
+            let mut guard = MONITOR_STATE.lock().map_err(|e| format!("Failed to lock app mutex: {}", e))?;
+            *guard = Some(MonitorState { working_monitor: monitor });
+        } else {
+            let mut guard = MONITOR_STATE.lock().map_err(|e| format!("Failed to lock app mutex: {}", e))?;
+            *guard = None;
+        }
         Ok(())
     }
 

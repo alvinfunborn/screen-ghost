@@ -20,6 +20,7 @@ pub fn create_app_builder() -> tauri::Builder<tauri::Wry> {
         .invoke_handler(tauri::generate_handler![
             command::get_monitors,
             command::set_working_monitor,
+            command::stop_monitoring,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

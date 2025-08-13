@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
+import PythonInstallationProgress from "./components/PythonInstallationProgress";
 
 interface MonitorInfo {
   id: number;
@@ -67,6 +68,17 @@ function App() {
     }
   };
 
+  const stopMonitoring = async () => {
+    try {
+      await invoke("stop_monitoring");
+      setSelectedMonitor(null);
+      setCurrentImage(null);
+      console.log("Stopped monitoring");
+    } catch (error) {
+      console.error("Failed to stop monitoring:", error);
+    }
+  };
+
   const convertImageDataToCanvas = (image: Image): string => {
     try {
       console.log("Converting image data:", image.width, "x", image.height, "data length:", image.data.length);
@@ -111,6 +123,7 @@ function App() {
 
   return (
     <div className="app">
+      <PythonInstallationProgress />
       <header className="app-header">
         <h1>Screen Ghost - Monitor Demo</h1>
       </header>
@@ -143,6 +156,15 @@ function App() {
           <h2>Live Image Display</h2>
           {selectedMonitor ? (
             <div className="image-container">
+              <div className="monitor-controls">
+                <h3>Monitoring Monitor {selectedMonitor.id}</h3>
+                <button 
+                  onClick={stopMonitoring}
+                  className="stop-button"
+                >
+                  Stop Monitoring
+                </button>
+              </div>
               {currentImage ? (
                 <div className="image-info">
                   <p>Receiving live image from Monitor {selectedMonitor.id}</p>

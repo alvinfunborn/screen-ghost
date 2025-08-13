@@ -43,3 +43,5 @@ tauri-plugin-process = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-positioner = "2"
 tauri-plugin-single-instance = "2"
+pyo3 = { version = "0.20", features = ["auto-initialize"] }
+rayon = "1.8"
