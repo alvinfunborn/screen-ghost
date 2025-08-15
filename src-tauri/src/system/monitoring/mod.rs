@@ -3,17 +3,16 @@ mod monitor_state;
 pub use monitor_state::MonitorState;
 
 use log::{error, info};
-use std::collections::HashMap;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use std::sync::Mutex;
 
-use crate::{ai::face_recognition, api::emitter, monitor::MonitorInfo, overlay, utils::rect::Rect};
+use crate::{ai::face_recognition, api::emitter, monitor::MonitorInfo, overlay};
 // use crate::ai::face_recognition;
 
 static THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 // 截屏间隔, 单位ms
-const SCREEN_SHOT_INTERVAL: u64 = 5000;
+const SCREEN_SHOT_INTERVAL: u64 = 100;
 const RECOGNITION_THRESHOLD: f32 = 0.55;
 
 pub async fn set_working_monitor(monitor: MonitorInfo) {
@@ -61,8 +60,6 @@ fn cal() {
     }
     let monitor = monitor.unwrap();
     
-    // 截图前隐藏mosaic
-    crate::overlay::overlay::hide_mosaic();
     let image = match monitor.screen_shot() {
         Ok(img) => img,
         Err(e) => {
@@ -70,8 +67,6 @@ fn cal() {
             return;  // 优雅退出而不是 panic
         }
     };
-    // 截图后恢复mosaic
-    crate::overlay::overlay::show_mosaic();
 
     match face_recognition::detect_targets_or_all_faces(&image, RECOGNITION_THRESHOLD) {
         Ok(rects) => {

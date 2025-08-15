@@ -11,6 +11,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED,
         SetWindowPos, HWND_TOPMOST, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+        SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY, WDA_EXCLUDEFROMCAPTURE,
     },
 };
 
@@ -185,6 +186,12 @@ unsafe fn apply_click_through_to_hwnd(hwnd: HWND) {
         }
     } else {
         info!("[set_overlay_style] HWND {:?} already click-through", hwnd);
+    }
+
+    // 将窗口从屏幕捕获中排除，避免截图时捕获到 overlay，从而无需隐藏/显示马赛克
+    match SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(WDA_EXCLUDEFROMCAPTURE.0)) {
+        Ok(()) => info!("[set_overlay_style] SetWindowDisplayAffinity: WDA_EXCLUDEFROMCAPTURE applied"),
+        Err(e) => warn!("[set_overlay_style] SetWindowDisplayAffinity failed or unsupported: {}", e),
     }
 }
 
