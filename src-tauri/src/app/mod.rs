@@ -12,7 +12,7 @@ mod app_builder;
 mod app_state;
 pub use app_state::AppState;
 
-use crate::{system, utils::logger, ai::face_detect};
+use crate::{system, utils::logger, ai::{face_detect, face_recognition}};
 
 const LOG_LEVEL: &str = "debug";
 
@@ -95,6 +95,18 @@ pub fn run() {
             error!("[✗] Failed to initialize Python environment: {}", e);
         } else {
             info!("[✓] Python environment initialized for face detection");
+        }
+
+        // Initialize face recognition and preload targets from exe_dir/faces
+        if let Err(e) = face_recognition::initialize_face_recognition() {
+            error!("[✗] init face recognition failed: {}", e);
+        } else {
+            info!("[✓] face recognition model initialized");
+            if let Err(e) = face_recognition::preload_targets_from_faces_dir(&app_handle) {
+                error!("[✗] preload targets failed: {}", e);
+            } else {
+                info!("[✓] preload targets done");
+            }
         }
 
         info!("=== application initialized ===");

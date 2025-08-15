@@ -2,9 +2,12 @@ use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::{self, Write};
+use std::env;
 use log::{info, warn, error};
 use once_cell::sync::OnceCell;
 use tauri::Emitter;
+
+use crate::api::emitter;
 
 
 static PYTHON_ENV_MANAGER: OnceCell<PythonEnvManager> = OnceCell::new();
@@ -47,12 +50,15 @@ impl PythonEnvManager {
         }
 
         info!("Initializing Python environment manager...");
-
+        emitter::emit_toast("正在初始化 Python 环境…");
+    
         // 1. 提取Python文件到临时目录
+        emitter::emit_toast("正在提取 Python 资源文件…");
         let python_files_path = self.extract_python_files()?;
         info!("Python files extracted to: {:?}", python_files_path);
 
         // 2. 检测系统Python
+        emitter::emit_toast("正在检测系统 Python…");
         if let Some(python_path) = self.detect_system_python()? {
             self.python_path = Some(python_path.clone());
             info!("Found system Python at: {:?}", python_path);
@@ -60,41 +66,71 @@ impl PythonEnvManager {
             // 3. 检查系统Python是否满足要求
             if self.check_system_python_requirements(&python_path)? {
                 info!("System Python meets requirements, using system Python");
+                emitter::emit_toast("系统 Python 就绪，正在完成初始化…");
                 self.is_initialized = true;
+                emitter::emit_toast_close();
                 return Ok(());
             } else {
                 info!("System Python found but missing required packages");
                 
                 // 尝试在系统Python中安装缺失的包
                 info!("Attempting to install missing packages in system Python...");
+                emitter::emit_toast("系统 Python 缺少依赖，正在安装缺失包…");
                 if self.install_packages_in_system_python(&python_path)? {
                     info!("Successfully installed packages in system Python");
+                    emitter::emit_toast("依赖安装完成，正在完成初始化…");
                     self.is_initialized = true;
+                    emitter::emit_toast_close();
                     return Ok(());
                 } else {
                     info!("Failed to install packages in system Python, falling back to virtual environment");
+                    emitter::emit_toast("系统 Python 依赖安装失败，回退到虚拟环境…");
                 }
             }
         } else {
             info!("No system Python found");
+            emitter::emit_toast("未检测到系统 Python，尝试使用本地/虚拟环境…");
+
+            // Windows 平台尝试本地静默安装到 APPDATA
+            #[cfg(target_os = "windows")]
+            {
+                match self.find_or_install_local_python_on_windows() {
+                    Ok(Some(local_python)) => {
+                        info!("Installed/Found local Python at: {:?}", local_python);
+                        self.python_path = Some(local_python);
+                    }
+                    Ok(None) => {
+                        info!("Local Python not found and installation skipped");
+                    }
+                    Err(e) => {
+                        warn!("Install local Python failed: {}", e);
+                    }
+                }
+            }
         }
 
-        // 4. 如果系统Python不可用，创建虚拟环境
+        // 4. 如果系统/本地Python不可用，创建虚拟环境（需要先确保有可用的python可执行文件）
         info!("Creating virtual environment as fallback...");
+        emitter::emit_toast("正在创建虚拟环境…");
         let virtual_env_path = self.create_virtual_environment()?;
         self.virtual_env_path = Some(virtual_env_path.clone());
         info!("Created virtual environment at: {:?}", virtual_env_path);
 
         // 5. 安装必要的包
+        emitter::emit_toast("正在安装必要依赖…");
         self.install_required_packages(&virtual_env_path)?;
 
         // 6. 最终验证
+        emitter::emit_toast("正在验证环境…");
         if !self.verify_environment_ready()? {
+            emitter::emit_toast("Python 环境验证失败");
             return Err("Python environment verification failed after installation".to_string());
         }
 
         self.is_initialized = true;
         info!("Python environment manager initialized successfully");
+        emitter::emit_toast("Python 环境初始化完成");
+        emitter::emit_toast_close();
         Ok(())
     }
 
@@ -127,6 +163,92 @@ impl PythonEnvManager {
         }
         
         Ok(None)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn get_local_python_install_dir(&self) -> Result<PathBuf, String> {
+        let app_dir = self.get_app_data_dir()?;
+        Ok(app_dir.join("python311"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn find_installed_python_in_local_dir(&self) -> Option<PathBuf> {
+        if let Ok(dir) = self.get_local_python_install_dir() {
+            let exe = dir.join("python.exe");
+            if exe.exists() {
+                return Some(exe);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    fn find_or_install_local_python_on_windows(&self) -> Result<Option<PathBuf>, String> {
+        if let Some(path) = self.find_installed_python_in_local_dir() {
+            return Ok(Some(path));
+        }
+
+        let target_dir = self.get_local_python_install_dir()?;
+        if !target_dir.exists() {
+            fs::create_dir_all(&target_dir).map_err(|e| format!("Create target dir failed: {}", e))?;
+        }
+
+        // 下载并静默安装官方 Python 3.11 x64 到用户目录
+        let temp_dir = std::env::temp_dir();
+        let installer_path = temp_dir.join("python-3.11.9-amd64.exe");
+
+        if !installer_path.exists() {
+            let url = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe";
+            info!("Downloading Python installer from: {}", url);
+
+            // 使用 PowerShell 下载，避免引入额外依赖
+            let download = Command::new("powershell")
+                .arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-Command")
+                .arg(format!(
+                    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+                    url,
+                    installer_path.display()
+                ))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+
+            match download {
+                Ok(out) if out.status.success() => info!("Python installer downloaded to: {:?}", installer_path),
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    return Err(format!("Download installer failed: {}", err));
+                }
+                Err(e) => return Err(format!("Execute PowerShell failed: {}", e)),
+            }
+        }
+
+        // 运行静默安装
+        info!("Installing Python silently to {:?}", target_dir);
+        let status = Command::new(&installer_path)
+            .arg("/quiet")
+            .arg("InstallAllUsers=0")
+            .arg("PrependPath=0")
+            .arg("Include_pip=1")
+            .arg(format!("TargetDir={}", target_dir.display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .status()
+            .map_err(|e| format!("Failed to start installer: {}", e))?;
+
+        if !status.success() {
+            return Err("Python installer exited with non-zero status".to_string());
+        }
+
+        // 校验安装结果
+        if let Some(exe) = self.find_installed_python_in_local_dir() {
+            Ok(Some(exe))
+        } else {
+            Err("Python not found after installation".to_string())
+        }
     }
 
     fn check_system_python_requirements(&self, python_path: &Path) -> Result<bool, String> {
@@ -515,39 +637,68 @@ impl PythonEnvManager {
         Err("Could not find pip executable in virtual environment".to_string())
     }
 
+    #[cfg(target_os = "windows")]
+    fn append_python_dir_to_process_env(&self) {
+        if let Some(ref python) = self.python_path {
+            if let Some(dir) = python.parent() {
+                let scripts = dir.join("Scripts");
+                let old_path = env::var("PATH").unwrap_or_default();
+                let mut new_path = format!("{};{}", dir.display(), old_path);
+                if scripts.exists() {
+                    new_path = format!("{};{}", scripts.display(), new_path);
+                }
+                env::set_var("PATH", new_path);
+                env::set_var("PYTHONHOME", dir);
+            }
+        }
+    }
+
     fn extract_python_files(&self) -> Result<PathBuf, String> {
         let app_data_dir = self.get_app_data_dir()?;
         let python_files_dir = app_data_dir.join("python_files");
         
-        // 如果Python文件已存在，直接返回
-        if python_files_dir.exists() {
-            return Ok(python_files_dir);
+        // 确保目标目录存在
+        if !python_files_dir.exists() {
+            fs::create_dir_all(&python_files_dir)
+                .map_err(|e| format!("Failed to create python files directory: {}", e))?;
         }
         
-        // 创建目录
-        fs::create_dir_all(&python_files_dir)
-            .map_err(|e| format!("Failed to create python files directory: {}", e))?;
-        
-        // 在开发环境中，直接从源码目录复制
+        // 开发环境：每次启动都覆盖拷贝，确保新增/更新的脚本可用（例如新增的 face_recognition.py）
         #[cfg(debug_assertions)]
         {
             let src_python_dir = PathBuf::from("src-tauri/python");
             if src_python_dir.exists() {
                 self.copy_dir_all(&src_python_dir, &python_files_dir)
                     .map_err(|e| format!("Failed to copy python files: {}", e))?;
+                // 调试：输出目录内容，确认脚本同步
+                if let Ok(read_dir) = fs::read_dir(&python_files_dir) {
+                    let mut names: Vec<String> = Vec::new();
+                    for entry in read_dir.flatten() {
+                        names.push(entry.file_name().to_string_lossy().to_string());
+                    }
+                    info!("python_files content: {:?}", names);
+                }
                 return Ok(python_files_dir);
             }
         }
         
-        // 在生产环境中，从资源目录提取
+        // 生产环境：若此前已存在则直接使用；否则尝试从源码目录复制（作为兜底）
         #[cfg(not(debug_assertions))]
         {
-            // 这里需要实现从打包资源中提取Python文件的逻辑
-            // 暂时使用开发环境的逻辑作为备选
+            if python_files_dir.exists() {
+                return Ok(python_files_dir);
+            }
             let src_python_dir = PathBuf::from("src-tauri/python");
             if src_python_dir.exists() {
                 self.copy_dir_all(&src_python_dir, &python_files_dir)
                     .map_err(|e| format!("Failed to copy python files: {}", e))?;
+                if let Ok(read_dir) = fs::read_dir(&python_files_dir) {
+                    let mut names: Vec<String> = Vec::new();
+                    for entry in read_dir.flatten() {
+                        names.push(entry.file_name().to_string_lossy().to_string());
+                    }
+                    info!("python_files content: {:?}", names);
+                }
                 return Ok(python_files_dir);
             }
         }
@@ -628,6 +779,13 @@ impl PythonEnvManager {
         }
         
         None
+    }
+
+    pub fn prepare_process_env(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            self.append_python_dir_to_process_env();
+        }
     }
 
     pub fn is_ready(&self) -> bool {

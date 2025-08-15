@@ -1,10 +1,32 @@
 import cv2
 import numpy as np
+import time
 from typing import List, Tuple
+
+# 全局缓存分类器实例，避免重复加载
+_FACE_CASCADE = None
+_FACE_CASCADE_ALT = None
+
+def get_face_cascade() -> cv2.CascadeClassifier:
+    """获取人脸检测器实例，全局缓存"""
+    global _FACE_CASCADE
+    if _FACE_CASCADE is None:
+        _FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml')
+        if _FACE_CASCADE.empty():
+            print("Warning: haarcascade_frontalface_alt2.xml not found, using default")
+            _FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    return _FACE_CASCADE
+
+def get_face_cascade_alt() -> cv2.CascadeClassifier:
+    """获取备用分类器实例"""
+    global _FACE_CASCADE_ALT
+    if _FACE_CASCADE_ALT is None:
+        _FACE_CASCADE_ALT = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    return _FACE_CASCADE_ALT
 
 def detect_faces(image_data: bytes, width: int, height: int) -> List[Tuple[int, int, int, int]]:
     """
-    人脸检测函数
+    人脸检测函数（优化版本）
     
     Args:
         image_data: BGRA格式的图像字节数据
@@ -14,6 +36,8 @@ def detect_faces(image_data: bytes, width: int, height: int) -> List[Tuple[int, 
     Returns:
         List[Tuple[int, int, int, int]]: 检测到的人脸矩形 (x, y, width, height)
     """
+    start_time = time.time()
+    
     try:
         # 将字节数据转换为numpy数组
         image_array = np.frombuffer(image_data, dtype=np.uint8)
@@ -28,26 +52,24 @@ def detect_faces(image_data: bytes, width: int, height: int) -> List[Tuple[int, 
         # 直方图均衡化以提高对比度
         gray_image = cv2.equalizeHist(gray_image)
         
-        # 加载人脸检测器
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml')
+        # 使用缓存的分类器实例
+        face_cascade = get_face_cascade()
         
-        # 如果默认分类器不存在，使用备用分类器
-        if face_cascade.empty():
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        # 动态参数：根据分辨率调整
+        min_size = max(20, min(width, height) // 20)
+        max_size = min(300, min(width, height) // 3)
         
         # 人脸检测参数
         scale_factor = 1.1
         min_neighbors = 3
-        min_size = (30, 30)
-        max_size = (300, 300)
         
         # 执行人脸检测
         faces = face_cascade.detectMultiScale(
             gray_image,
             scaleFactor=scale_factor,
             minNeighbors=min_neighbors,
-            minSize=min_size,
-            maxSize=max_size
+            minSize=(min_size, min_size),
+            maxSize=(max_size, max_size)
         )
         
         # 后处理：置信度过滤和非极大值抑制
@@ -63,10 +85,82 @@ def detect_faces(image_data: bytes, width: int, height: int) -> List[Tuple[int, 
             h = min(h, height - y)
             result.append((x, y, w, h))
         
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[detect_faces] Processed {width}x{height} in {elapsed:.1f}ms, found {len(result)} faces")
+        
         return result
         
     except Exception as e:
         print(f"Face detection error: {e}")
+        return []
+
+def detect_faces_gray(gray_data: bytes, width: int, height: int, scale: float = 1.0) -> List[Tuple[int, int, int, int]]:
+    """
+    高性能版本：直接处理灰度图像，避免颜色空间转换
+    
+    Args:
+        gray_data: 灰度图像字节数据（单通道）
+        width: 图像宽度
+        height: 图像高度
+        scale: 图像缩放比例（1.0为原始大小）
+    
+    Returns:
+        检测到的人脸矩形列表
+    """
+    start_time = time.time()
+    
+    try:
+        # 直接重塑为灰度图像，避免转换
+        gray_array = np.frombuffer(gray_data, dtype=np.uint8)
+        gray_image = gray_array.reshape(height, width)
+        
+        # 如果指定了缩放，进行图像缩放
+        if scale != 1.0:
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            gray_image = cv2.resize(gray_image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            width, height = new_width, new_height
+        
+        # 动态参数：根据分辨率调整
+        min_size = max(15, min(width, height) // 25)  # 更激进的最小尺寸
+        max_size = min(250, min(width, height) // 4)  # 更保守的最大尺寸
+        
+        # 使用缓存的分类器实例
+        face_cascade = get_face_cascade()
+        
+        # 高性能参数
+        faces = face_cascade.detectMultiScale(
+            gray_image,
+            scaleFactor=1.15,  # 稍微激进一点，减少检测层数
+            minNeighbors=2,    # 降低误检
+            minSize=(min_size, min_size),
+            maxSize=(max_size, max_size)
+        )
+        
+        # 简单过滤和坐标调整
+        result = []
+        for (x, y, w, h) in faces:
+            # 如果图像被缩放，需要调整回原始坐标
+            if scale != 1.0:
+                x = int(x / scale)
+                y = int(y / scale)
+                w = int(w / scale)
+                h = int(h / scale)
+            
+            # 确保坐标在图像范围内
+            x = max(0, min(x, width - w))
+            y = max(0, min(y, height - h))
+            w = min(w, width - x)
+            h = min(h, height - y)
+            result.append((x, y, w, h))
+        
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[detect_faces_gray] Processed {width}x{height} (scale={scale}) in {elapsed:.1f}ms, found {len(result)} faces")
+        
+        return result
+        
+    except Exception as e:
+        print(f"Gray face detection error: {e}")
         return []
 
 def post_process_faces(faces: np.ndarray, confidence_threshold: float = 0.5) -> np.ndarray:
@@ -182,7 +276,7 @@ def calculate_overlap(rect1: Tuple[int, int, int, int], rect2: Tuple[int, int, i
 # 高性能版本的人脸检测
 def detect_faces_high_performance(image_data: bytes, width: int, height: int) -> List[Tuple[int, int, int, int]]:
     """
-    高性能人脸检测版本
+    高性能人脸检测版本（优化版）
     
     Args:
         image_data: BGRA格式的图像字节数据
@@ -192,6 +286,8 @@ def detect_faces_high_performance(image_data: bytes, width: int, height: int) ->
     Returns:
         检测到的人脸矩形列表
     """
+    start_time = time.time()
+    
     try:
         # 将字节数据转换为numpy数组
         image_array = np.frombuffer(image_data, dtype=np.uint8)
@@ -200,18 +296,20 @@ def detect_faces_high_performance(image_data: bytes, width: int, height: int) ->
         # 转换为灰度图像
         gray_image = cv2.cvtColor(image_array, cv2.COLOR_BGRA2GRAY)
         
-        # 加载人脸检测器
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml')
-        if face_cascade.empty():
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        # 使用缓存的分类器实例
+        face_cascade = get_face_cascade()
+        
+        # 动态参数：根据分辨率调整
+        min_size = max(15, min(width, height) // 25)
+        max_size = min(250, min(width, height) // 4)
         
         # 高性能参数
         faces = face_cascade.detectMultiScale(
             gray_image,
             scaleFactor=1.2,  # 更大的缩放因子，更快
             minNeighbors=2,   # 更少的邻居要求
-            minSize=(20, 20), # 更小的最小尺寸
-            maxSize=(200, 200) # 更小的最大尺寸
+            minSize=(min_size, min_size),
+            maxSize=(max_size, max_size)
         )
         
         # 简单过滤
@@ -223,8 +321,91 @@ def detect_faces_high_performance(image_data: bytes, width: int, height: int) ->
             h = min(h, height - y)
             result.append((x, y, w, h))
         
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[detect_faces_high_performance] Processed {width}x{height} in {elapsed:.1f}ms, found {len(result)} faces")
+        
         return result
         
     except Exception as e:
         print(f"High performance face detection error: {e}")
-        return [] 
+        return []
+
+def detect_faces_batch(images_data: List[Tuple[bytes, int, int]]) -> List[List[Tuple[int, int, int, int]]]:
+    """
+    批量人脸检测，提高处理效率
+    
+    Args:
+        images_data: 图像数据列表，每个元素为 (image_bytes, width, height)
+    
+    Returns:
+        检测结果列表，每个元素为对应图像的人脸矩形列表
+    """
+    start_time = time.time()
+    
+    try:
+        # 确保分类器已加载
+        face_cascade = get_face_cascade()
+        
+        results = []
+        for i, (image_data, width, height) in enumerate(images_data):
+            try:
+                # 转换为灰度图像
+                image_array = np.frombuffer(image_data, dtype=np.uint8)
+                image_array = image_array.reshape(height, width, 4)
+                gray_image = cv2.cvtColor(image_array, cv2.COLOR_BGRA2GRAY)
+                
+                # 动态参数
+                min_size = max(15, min(width, height) // 25)
+                max_size = min(250, min(width, height) // 4)
+                
+                # 检测
+                faces = face_cascade.detectMultiScale(
+                    gray_image,
+                    scaleFactor=1.15,
+                    minNeighbors=2,
+                    minSize=(min_size, min_size),
+                    maxSize=(max_size, max_size)
+                )
+                
+                # 处理结果
+                result = []
+                for (x, y, w, h) in faces:
+                    x = max(0, min(x, width - w))
+                    y = max(0, min(y, height - h))
+                    w = min(w, width - x)
+                    h = min(h, height - y)
+                    result.append((x, y, w, h))
+                
+                results.append(result)
+                
+            except Exception as e:
+                print(f"Batch detection error for image {i}: {e}")
+                results.append([])
+        
+        elapsed = (time.time() - start_time) * 1000
+        print(f"[detect_faces_batch] Processed {len(images_data)} images in {elapsed:.1f}ms")
+        
+        return results
+        
+    except Exception as e:
+        print(f"Batch detection error: {e}")
+        return [[] for _ in images_data]
+
+def get_detection_stats() -> dict:
+    """
+    获取检测器统计信息
+    
+    Returns:
+        包含分类器状态和性能信息的字典
+    """
+    stats = {
+        "cascade_loaded": _FACE_CASCADE is not None,
+        "cascade_alt_loaded": _FACE_CASCADE_ALT is not None,
+        "cascade_path": cv2.data.haarcascades + 'haarcascade_frontalface_alt2.xml',
+        "cascade_alt_path": cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    }
+    
+    if _FACE_CASCADE is not None:
+        stats["cascade_empty"] = _FACE_CASCADE.empty()
+    
+    return stats 

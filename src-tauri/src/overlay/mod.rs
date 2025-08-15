@@ -10,7 +10,7 @@ use windows::Win32::{
     Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE},
     UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED,
-        SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
+        SetWindowPos, HWND_TOPMOST, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     },
 };
 
@@ -109,7 +109,16 @@ pub async fn create_overlay_window(
                 );
                 info!("[create_overlay_window] Setting transparent style and topmost...");
                 set_window_transparent_style(&window, hwnd_raw as i64);
-                // 再次确保顶置且不激活
+                // 通过“先取消再设置顶置 + 显示”确保位于任务栏之上
+                let _ = SetWindowPos(
+                    HWND(hwnd_raw as *mut _),
+                    Some(HWND(HWND_NOTOPMOST.0)),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
                 let _ = SetWindowPos(
                     HWND(hwnd_raw as *mut _),
                     Some(HWND(HWND_TOPMOST.0)),
@@ -117,7 +126,7 @@ pub async fn create_overlay_window(
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
             }
         }

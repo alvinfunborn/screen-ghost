@@ -77,6 +77,22 @@ const PythonInstallationProgress: React.FC = () => {
       })
     );
 
+    // 监听通用 toast 事件
+    unlistenPromises.push(
+      listen<string>('toast', (event) => {
+        const msg = event.payload;
+        if (msg === 'close') {
+          setStatus(prev => ({ ...prev, isVisible: false }));
+          return;
+        }
+        setStatus({
+          isVisible: true,
+          message: msg,
+          type: 'progress'
+        });
+      })
+    );
+
     return () => {
       unlistenPromises.forEach(unlisten => unlisten.then(fn => fn()));
     };

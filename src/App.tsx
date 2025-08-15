@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
@@ -13,40 +13,55 @@ interface MonitorInfo {
   scale_factor: number;
 }
 
-interface Image {
+interface Rect {
+  x: number;
+  y: number;
   width: number;
   height: number;
-  data: number[]; // BGRA format
 }
+
+// 后端直接 emit Vec<Rect>，前端按数组解析
+// type FrameInfo = Record<string, Rect[]>;
 
 function App() {
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<MonitorInfo | null>(null);
-  const [currentImage, setCurrentImage] = useState<Image | null>(null);
+  const [faceRects, setFaceRects] = useState<Rect[]>([]);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({ width: 800, height: 400 });
 
   // Load monitors on component mount
   useEffect(() => {
     loadMonitors();
   }, []);
 
-  // Listen for image events
+  // Listen for frame_info (face rectangles) events
   useEffect(() => {
-    if (selectedMonitor) {
-      console.log("Setting up image event listener for monitor:", selectedMonitor.id);
-      
-      const unlisten = listen<Image>("image", (event) => {
-        console.log("Received image:", event.payload);
-        setCurrentImage(event.payload);
-      });
-
-      return () => {
-        console.log("Cleaning up image event listener");
-        unlisten.then(fn => fn()).catch(error => {
-          console.error("Failed to cleanup event listener:", error);
-        });
-      };
-    }
+    if (!selectedMonitor) return;
+    console.log("Setting up frame_info listener for monitor:", selectedMonitor.id);
+    const unlisten = listen<Rect[]>("frame_info", (event) => {
+      const payload = event.payload as unknown;
+      const rects = Array.isArray(payload) ? (payload as Rect[]) : [];
+      console.log("frame_info received:", rects);
+      setFaceRects(rects);
+    });
+    return () => {
+      unlisten.then(fn => fn()).catch(err => console.error("Failed to cleanup frame_info listener", err));
+    };
   }, [selectedMonitor]);
+
+  // Measure viewport size for scaling
+  useEffect(() => {
+    const updateSize = () => {
+      if (viewportRef.current) {
+        const rect = viewportRef.current.getBoundingClientRect();
+        setViewportSize({ width: rect.width, height: rect.height });
+      }
+    };
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, [monitors.length]);
 
   const loadMonitors = async () => {
     try {
@@ -72,54 +87,47 @@ function App() {
     try {
       await invoke("stop_monitoring");
       setSelectedMonitor(null);
-      setCurrentImage(null);
       console.log("Stopped monitoring");
     } catch (error) {
       console.error("Failed to stop monitoring:", error);
     }
   };
 
-  const convertImageDataToCanvas = (image: Image): string => {
+  const handleMonitorClick = async (monitor: MonitorInfo) => {
     try {
-      console.log("Converting image data:", image.width, "x", image.height, "data length:", image.data.length);
-      
-      const canvas = document.createElement('canvas');
-      canvas.width = image.width;
-      canvas.height = image.height;
-      const ctx = canvas.getContext('2d');
-      
-      if (!ctx) {
-        console.error("Failed to get canvas context");
-        return '';
+      if (selectedMonitor && selectedMonitor.id === monitor.id) {
+        await stopMonitoring();
+        return;
       }
-
-      const imageData = ctx.createImageData(image.width, image.height);
-      const data = imageData.data;
-
-      // 验证数据长度
-      const expectedLength = image.width * image.height * 4;
-      if (image.data.length !== expectedLength) {
-        console.error("Image data length mismatch:", image.data.length, "expected:", expectedLength);
-        return '';
+      if (selectedMonitor && selectedMonitor.id !== monitor.id) {
+        await stopMonitoring();
       }
-
-      // Convert BGRA to RGBA
-      for (let i = 0; i < image.data.length; i += 4) {
-        data[i] = image.data[i + 2];     // R (from B)
-        data[i + 1] = image.data[i + 1]; // G
-        data[i + 2] = image.data[i];     // B (from R)
-        data[i + 3] = image.data[i + 3]; // A
-      }
-
-      ctx.putImageData(imageData, 0, 0);
-      const dataUrl = canvas.toDataURL();
-      console.log("Image conversion completed, data URL length:", dataUrl.length);
-      return dataUrl;
-    } catch (error) {
-      console.error("Error converting image data:", error);
-      return '';
+      await selectMonitor(monitor);
+    } catch (e) {
+      console.error('handleMonitorClick failed', e);
     }
   };
+
+  // Compute virtual desktop bounds and scaling
+  const bounds = (() => {
+    if (monitors.length === 0) {
+      return { minX: 0, minY: 0, width: 1, height: 1 };
+    }
+    const minX = Math.min(...monitors.map(m => m.x));
+    const minY = Math.min(...monitors.map(m => m.y));
+    const maxX = Math.max(...monitors.map(m => m.x + m.width));
+    const maxY = Math.max(...monitors.map(m => m.y + m.height));
+    return { minX, minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+  })();
+
+  const scale = Math.min(
+    viewportSize.width / bounds.width,
+    viewportSize.height / bounds.height
+  );
+  const scaledTotalWidth = bounds.width * scale;
+  const scaledTotalHeight = bounds.height * scale;
+  const offsetX = (viewportSize.width - scaledTotalWidth) / 2;
+  const offsetY = (viewportSize.height - scaledTotalHeight) / 2;
 
   return (
     <div className="app">
@@ -130,63 +138,53 @@ function App() {
 
       <main className="app-main">
         <section className="monitor-section">
-          <h2>Available Monitors</h2>
-          <div className="monitor-grid">
-            {monitors.map((monitor) => (
-              <div
-                key={monitor.id}
-                className={`monitor-card ${selectedMonitor?.id === monitor.id ? 'selected' : ''}`}
-                onClick={() => selectMonitor(monitor)}
-              >
-                <h3>Monitor {monitor.id}</h3>
-                <div className="monitor-info">
-                  <p><strong>Position:</strong> ({monitor.x}, {monitor.y})</p>
-                  <p><strong>Size:</strong> {monitor.width} × {monitor.height}</p>
-                  <p><strong>Scale:</strong> {monitor.scale_factor}</p>
-                </div>
-                {selectedMonitor?.id === monitor.id && (
-                  <div className="selected-indicator">✓ Selected</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </section>
+          <h2>显示器布局</h2>
+          <div className="display-viewport" ref={viewportRef}>
+            <div className="display-canvas" style={{ width: `${viewportSize.width}px`, height: `${viewportSize.height}px` }}>
+              {monitors.map(m => {
+                const left = offsetX + (m.x - bounds.minX) * scale;
+                const top = offsetY + (m.y - bounds.minY) * scale;
+                const width = m.width * scale;
+                const height = m.height * scale;
+                const isSelected = selectedMonitor?.id === m.id;
+                return (
+                  <div
+                    key={m.id}
+                    className={`display-monitor ${isSelected ? 'selected' : ''}`}
+                    style={{ left, top, width, height }}
+                    onClick={() => handleMonitorClick(m)}
+                    title={`位置(${m.x}, ${m.y}) 尺寸 ${m.width}×${m.height} 缩放 ${m.scale_factor}`}
+                  >
+                    <div className="display-label">{m.id + 1}</div>
+                  </div>
+                );
+              })}
 
-        <section className="image-section">
-          <h2>Live Image Display</h2>
-          {selectedMonitor ? (
-            <div className="image-container">
-              <div className="monitor-controls">
-                <h3>Monitoring Monitor {selectedMonitor.id}</h3>
-                <button 
-                  onClick={stopMonitoring}
-                  className="stop-button"
-                >
-                  Stop Monitoring
-                </button>
-              </div>
-              {currentImage ? (
-                <div className="image-info">
-                  <p>Receiving live image from Monitor {selectedMonitor.id}</p>
-                  <p>Image size: {currentImage.width} × {currentImage.height}</p>
-                  <img
-                    src={convertImageDataToCanvas(currentImage)}
-                    alt="Live monitor capture"
-                    className="live-image"
+              {/* Face rectangles overlay for selected monitor */}
+              {selectedMonitor && faceRects.map((r, idx) => {
+                const left = offsetX + (selectedMonitor.x - bounds.minX + r.x) * scale;
+                const top = offsetY + (selectedMonitor.y - bounds.minY + r.y) * scale;
+                const width = r.width * scale;
+                const height = r.height * scale;
+                return (
+                  <div
+                    key={`face-${idx}`}
+                    style={{
+                      position: 'absolute',
+                      left,
+                      top,
+                      width,
+                      height,
+                      border: '2px solid #ff5252',
+                      boxSizing: 'border-box',
+                      pointerEvents: 'none',
+                    }}
+                    title={`face ${idx+1}: (${r.x}, ${r.y}, ${r.width}x${r.height})`}
                   />
-                </div>
-              ) : (
-                <div className="waiting-message">
-                  <p>Waiting for image data from Monitor {selectedMonitor.id}...</p>
-                  <div className="loading-spinner"></div>
-                </div>
-              )}
+                );
+              })}
             </div>
-          ) : (
-            <div className="no-monitor-selected">
-              <p>Please select a monitor to start receiving live images</p>
-            </div>
-          )}
+          </div>
         </section>
       </main>
     </div>

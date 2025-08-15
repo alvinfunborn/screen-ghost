@@ -10,6 +10,135 @@ use windows::Win32::Graphics::Dxgi::{IDXGIFactory1, CreateDXGIFactory1, IDXGIAda
 
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
+use std::sync::{Arc, Mutex, OnceLock};
+
+// 全局 DirectX 资源管理器
+static DIRECTX_MANAGER: OnceLock<Arc<Mutex<DirectXResourceManager>>> = OnceLock::new();
+
+struct DirectXResourceManager {
+    device: Option<ID3D11Device>,
+    context: Option<ID3D11DeviceContext>,
+    staging_texture: Option<ID3D11Texture2D>,
+    output_buffer: Vec<u8>,
+    is_initialized: bool,
+    last_width: i32,
+    last_height: i32,
+}
+
+impl DirectXResourceManager {
+    fn new() -> Self {
+        Self {
+            device: None,
+            context: None,
+            staging_texture: None,
+            output_buffer: Vec::new(),
+            is_initialized: false,
+            last_width: 0,
+            last_height: 0,
+        }
+    }
+    
+    fn get_instance() -> Arc<Mutex<DirectXResourceManager>> {
+        DIRECTX_MANAGER.get_or_init(|| {
+            Arc::new(Mutex::new(DirectXResourceManager::new()))
+        }).clone()
+    }
+    
+    fn initialize(&mut self) -> Result<(), String> {
+        if self.is_initialized {
+            return Ok(());
+        }
+        
+        unsafe {
+            // 创建 D3D11 设备和上下文
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            
+            let hr = D3D11CreateDevice(
+                None,
+                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            );
+            
+            if hr.is_err() || device.is_none() || context.is_none() {
+                return Err("Failed to create D3D11 device".to_string());
+            }
+            
+            self.device = device;
+            self.context = context;
+            self.is_initialized = true;
+            
+            info!("[DirectXResourceManager] Initialized successfully");
+        }
+        
+        Ok(())
+    }
+    
+    fn ensure_staging_texture(&mut self, width: i32, height: i32) -> Result<(), String> {
+        // 如果尺寸没变，直接返回
+        if self.last_width == width && self.last_height == height && self.staging_texture.is_some() {
+            return Ok(());
+        }
+        
+        unsafe {
+            if let (Some(device), Some(_context)) = (&self.device, &self.context) {
+                // 创建新的 staging texture
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                desc.Width = width as u32;
+                desc.Height = height as u32;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.SampleDesc.Quality = 0;
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.BindFlags = 0;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                desc.MiscFlags = 0;
+                
+                let mut staging_texture: Option<ID3D11Texture2D> = None;
+                device.CreateTexture2D(&desc, None, Some(&mut staging_texture))
+                    .map_err(|e| format!("Failed to create staging texture: {}", e))?;
+                
+                self.staging_texture = staging_texture;
+                self.last_width = width;
+                self.last_height = height;
+                
+                // 预分配输出缓冲区
+                let buffer_size = (width * height * 4) as usize;
+                if self.output_buffer.len() < buffer_size {
+                    self.output_buffer.resize(buffer_size, 0);
+                }
+                
+                info!("[DirectXResourceManager] Created staging texture {}x{}", width, height);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn get_device(&self) -> Option<&ID3D11Device> {
+        self.device.as_ref()
+    }
+    
+    fn get_context(&self) -> Option<&ID3D11DeviceContext> {
+        self.context.as_ref()
+    }
+    
+    fn get_staging_texture(&self) -> Option<&ID3D11Texture2D> {
+        self.staging_texture.as_ref()
+    }
+    
+    fn get_output_buffer(&mut self) -> &mut Vec<u8> {
+        &mut self.output_buffer
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorInfo {
@@ -91,23 +220,31 @@ impl MonitorInfo {
             // 创建兼容的DC和位图
             let mem_dc = CreateCompatibleDC(Some(dc));
             if mem_dc.is_invalid() {
-                ReleaseDC(Some(desktop), dc);
+                let released = ReleaseDC(Some(desktop), dc);
+                if released == 0 {
+                    warn!("[screen_shot_gdi] ReleaseDC failed when mem_dc invalid");
+                }
                 return Err("Failed to create compatible DC".to_string());
             }
 
             let bitmap = CreateCompatibleBitmap(dc, self.width, self.height);
             if bitmap.is_invalid() {
-                DeleteDC(mem_dc);
-                ReleaseDC(Some(desktop), dc);
+                let ok = DeleteDC(mem_dc).as_bool();
+                if !ok { warn!("[screen_shot_gdi] DeleteDC failed after CreateCompatibleBitmap error"); }
+                let released = ReleaseDC(Some(desktop), dc);
+                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after CreateCompatibleBitmap error"); }
                 return Err("Failed to create compatible bitmap".to_string());
             }
 
             // 选择位图到内存DC
             let old_bitmap = SelectObject(mem_dc, bitmap.into());
             if old_bitmap.is_invalid() {
-                DeleteObject(bitmap.into());
-                DeleteDC(mem_dc);
-                ReleaseDC(Some(desktop), dc);
+                let ok1 = DeleteObject(bitmap.into()).as_bool();
+                if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed after SelectObject error"); }
+                let ok2 = DeleteDC(mem_dc).as_bool();
+                if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed after SelectObject error"); }
+                let released = ReleaseDC(Some(desktop), dc);
+                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after SelectObject error"); }
                 return Err("Failed to select bitmap".to_string());
             }
 
@@ -125,10 +262,13 @@ impl MonitorInfo {
             );
 
             if result.is_err() {
-                SelectObject(mem_dc, old_bitmap);
-                DeleteObject(bitmap.into());
-                DeleteDC(mem_dc);
-                ReleaseDC(Some(desktop), dc);
+                let _ = SelectObject(mem_dc, old_bitmap);
+                let ok1 = DeleteObject(bitmap.into()).as_bool();
+                if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed after BitBlt error"); }
+                let ok2 = DeleteDC(mem_dc).as_bool();
+                if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed after BitBlt error"); }
+                let released = ReleaseDC(Some(desktop), dc);
+                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after BitBlt error"); }
                 return Err("BitBlt failed".to_string());
             }
 
@@ -166,18 +306,24 @@ impl MonitorInfo {
             );
 
             if lines == 0 {
-                SelectObject(mem_dc, old_bitmap);
-                DeleteObject(bitmap.into());
-                DeleteDC(mem_dc);
-                ReleaseDC(Some(desktop), dc);
+                let _ = SelectObject(mem_dc, old_bitmap);
+                let ok1 = DeleteObject(bitmap.into()).as_bool();
+                if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed after GetDIBits error"); }
+                let ok2 = DeleteDC(mem_dc).as_bool();
+                if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed after GetDIBits error"); }
+                let released = ReleaseDC(Some(desktop), dc);
+                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after GetDIBits error"); }
                 return Err("GetDIBits failed".to_string());
             }
 
             // 清理资源
-            SelectObject(mem_dc, old_bitmap);
-            DeleteObject(bitmap.into());
-            DeleteDC(mem_dc);
-            ReleaseDC(Some(desktop), dc);
+            let _ = SelectObject(mem_dc, old_bitmap);
+            let ok1 = DeleteObject(bitmap.into()).as_bool();
+            if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed during cleanup"); }
+            let ok2 = DeleteDC(mem_dc).as_bool();
+            if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed during cleanup"); }
+            let released = ReleaseDC(Some(desktop), dc);
+            if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed during cleanup"); }
 
             let elapsed = start_time.elapsed();
             info!("[screen_shot_gdi] GDI screenshot completed in {:?}: {}x{}", elapsed, self.width, self.height);
@@ -191,6 +337,22 @@ impl MonitorInfo {
     }
 
     fn screen_shot_directx(&self) -> Result<Image, String> {
+        // 首先尝试优化的 DirectX 方法
+        info!("[screen_shot_directx] Trying optimized method");
+        match self.screen_shot_directx_optimized() {
+            Ok(image) => {
+                if self.has_valid_content(&image) {
+                    info!("[screen_shot_directx] Optimized method succeeded");
+                    return Ok(image);
+                } else {
+                    warn!("[screen_shot_directx] Optimized method returned blank content");
+                }
+            }
+            Err(e) => {
+                warn!("[screen_shot_directx] Optimized method failed: {}, trying standard method", e);
+            }
+        }
+        
         // 尝试多种DirectX方法
         info!("[screen_shot_directx] Trying standard method");
         match self.screen_shot_directx_standard() {
@@ -223,6 +385,163 @@ impl MonitorInfo {
         }
         
         Err("All DirectX methods failed".to_string())
+    }
+
+    // 新增：优化的 DirectX 截图函数，使用资源管理器
+    fn screen_shot_directx_optimized(&self) -> Result<Image, String> {
+        unsafe {
+            let start_time = std::time::Instant::now();
+            
+            // 获取资源管理器实例
+            let manager = DirectXResourceManager::get_instance();
+            
+            // 先初始化并创建（或复用）资源，然后克隆所需句柄，避免借用冲突
+            let (device, context, staging_texture) = {
+                let mut mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
+                // 确保资源管理器已初始化
+                mgr.initialize()?;
+                // 确保 staging texture 已创建
+                mgr.ensure_staging_texture(self.width, self.height)?;
+                // 克隆 COM 句柄供后续使用
+                let device = mgr.get_device().cloned().ok_or("Device not available")?;
+                let context = mgr.get_context().cloned().ok_or("Context not available")?;
+                let staging_texture = mgr.get_staging_texture().cloned().ok_or("Staging texture not available")?;
+                (device, context, staging_texture)
+            };
+            
+            // 创建DXGI工厂
+            let factory: IDXGIFactory1 = match CreateDXGIFactory1() {
+                Ok(f) => f,
+                Err(e) => return Err(format!("CreateDXGIFactory1 failed: {e}")),
+            };
+            
+            // 枚举适配器和输出，找到目标显示器
+            let mut _adapter: Option<IDXGIAdapter1> = None;
+            let mut output: Option<IDXGIOutput> = None;
+            let mut i = 0;
+            let mut found = false;
+            
+            while let Ok(a) = factory.EnumAdapters1(i) {
+                let mut j = 0;
+                
+                while let Ok(o) = a.EnumOutputs(j) {
+                    let desc = o.GetDesc().unwrap();
+                    let ox = desc.DesktopCoordinates.left;
+                    let oy = desc.DesktopCoordinates.top;
+                    let ow = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left + 1;
+                    let oh = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+                    
+                    // 使用更宽松的匹配条件，允许10像素的误差
+                    let width_match = (self.width - ow).abs() <= 10;
+                    let height_match = (self.height - oh).abs() <= 10;
+                    
+                    if self.x == ox && self.y == oy && width_match && height_match {
+                        info!("[screen_shot_directx_optimized] Found matching output: Adapter={}, Output={}", i, j);
+                        _adapter = Some(a.clone());
+                        output = Some(o);
+                        found = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if found { break; }
+                i += 1;
+            }
+            
+            if !found {
+                return Err("No matching adapter/output found".to_string());
+            }
+            
+            // 适配器句柄此处不再需要显式使用
+            let output = match output { Some(o) => o, None => return Err("No output found".to_string()) };
+            
+            // 获取Output1和Duplication
+            let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("Output1 cast failed: {e}"))?;
+            
+            // 尝试多次获取duplication，有时第一次会失败
+            let mut duplication: Option<IDXGIOutputDuplication> = None;
+            let mut retry_count = 0;
+            const MAX_RETRIES: i32 = 3;
+            
+            while duplication.is_none() && retry_count < MAX_RETRIES {
+                // DuplicateOutput 需要 IUnknown；ID3D11Device 可直接作为 Param<IUnknown>
+                match output1.DuplicateOutput(&device) {
+                    Ok(dup) => {
+                        duplication = Some(dup);
+                        info!("[screen_shot_directx_optimized] Output duplication created on attempt {}", retry_count + 1);
+                    }
+                    Err(e) => {
+                        retry_count += 1;
+                        if retry_count >= MAX_RETRIES {
+                            return Err(format!("DuplicateOutput failed after {} attempts: {e}", MAX_RETRIES));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
+            
+            let duplication = duplication.unwrap();
+            
+            // 获取下一帧
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource = None;
+            let hr = duplication.AcquireNextFrame(100, &mut frame_info, &mut resource);
+            if hr.is_err() {
+                return Err("AcquireNextFrame failed".to_string());
+            }
+            let resource = resource.unwrap();
+            
+            // 检查是否有累积帧
+            if frame_info.AccumulatedFrames == 0 {
+                warn!("[screen_shot_directx_optimized] No accumulated frames");
+            }
+            
+            // 拷贝到复用的 staging texture
+            let tex: ID3D11Texture2D = resource.cast().map_err(|e| format!("Resource cast failed: {e}"))?;
+            context.CopyResource(&staging_texture, &tex);
+            
+            // 读取像素数据到复用的缓冲区
+            let mut mapped = windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&staging_texture, 0, windows::Win32::Graphics::Direct3D11::D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|e| format!("Map failed: {e}"))?;
+            
+            let pitch = mapped.RowPitch as usize;
+            let width = self.width as usize;
+            let height = self.height as usize;
+            
+            // 获取复用缓冲区并确保大小足够
+            let image_data = {
+                let mut mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
+                let output_buffer = mgr.get_output_buffer();
+                if output_buffer.len() < width * height * 4 {
+                    output_buffer.resize(width * height * 4, 0);
+                }
+            // 逐行复制数据到复用缓冲区
+            // 逐行内存复制（仅在调用处使用 unsafe）
+            for y in 0..height {
+                let src = (mapped.pData as *const u8).wrapping_add(y * pitch);
+                // 目标切片范围已在上方 resize 保证
+                let start = y * width * 4;
+                let end = start + width * 4;
+                let dst_slice = &mut output_buffer[start..end];
+                std::ptr::copy_nonoverlapping(src, dst_slice.as_mut_ptr(), width * 4);
+            }
+                // 返回一个拷贝用于构造 Image，避免持有锁
+                output_buffer[..width * height * 4].to_vec()
+            };
+            
+            context.Unmap(&staging_texture, 0);
+            duplication.ReleaseFrame().ok();
+            
+            let elapsed = start_time.elapsed();
+            info!("[screen_shot_directx_optimized] Optimized DirectX screenshot completed in {:?}: {}x{}", elapsed, width, height);
+            
+            Ok(Image {
+                width: width as i32,
+                height: height as i32,
+                data: image_data,
+            })
+        }
     }
 
     fn screen_shot_directx_standard(&self) -> Result<Image, String> {

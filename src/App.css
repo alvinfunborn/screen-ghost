@@ -56,6 +56,53 @@ body {
   padding-bottom: 0.5rem;
 }
 
+.display-viewport {
+  width: 100%;
+  height: 420px;
+  background: #f0f3f7;
+  border: 1px solid #d9e2ec;
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+  margin-bottom: 1.5rem;
+}
+
+.display-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.display-monitor {
+  position: absolute;
+  background: linear-gradient(180deg, #ffffff 0%, #f6f8fb 100%);
+  border: 2px solid #cbd5e1;
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #334155;
+  user-select: none;
+}
+
+.display-monitor:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+}
+
+.display-monitor.selected {
+  border-color: #2563eb;
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.25);
+}
+
+.display-label {
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+
 .monitor-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
