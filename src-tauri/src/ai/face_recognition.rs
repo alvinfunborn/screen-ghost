@@ -1,3 +1,4 @@
+use crate::config;
 use crate::monitor::Image;
 use crate::utils::rect::Rect;
 use crate::ai::python_env;
@@ -13,12 +14,6 @@ static TARGET_EMBEDDINGS: OnceCell<RwLock<HashMap<String, Arc<Vec<f32>>>>> = Onc
 
 fn get_store() -> &'static RwLock<HashMap<String, Arc<Vec<f32>>>> {
     TARGET_EMBEDDINGS.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-// 供内部使用的便捷检查
-fn has_targets() -> bool {
-    let store = get_store().read().unwrap();
-    !store.is_empty()
 }
 
 pub fn initialize_face_recognition() -> Result<(), String> {
@@ -108,7 +103,8 @@ pub fn preload_targets_from_faces_dir(app_handle: &tauri::AppHandle) -> Result<(
     Ok(())
 }
 
-pub fn recognize_best(image: &Image, threshold: f32) -> Result<Option<(Rect, String, f32)>, String> {
+pub fn recognize_best(image: &Image) -> Result<Option<(Rect, String, f32)>, String> {
+    let threshold = config::get_config().unwrap().face.unwrap().recognition.threshold;
     let rects = crate::ai::face_detect::face_detect(image)?;
     if rects.is_empty() { return Ok(None); }
     let store = get_store().read().unwrap();
@@ -133,7 +129,7 @@ pub fn recognize_best(image: &Image, threshold: f32) -> Result<Option<(Rect, Str
 
 // 当没有任何目标（faces/为空或未加载）时，回退为“检测所有人脸”；
 // 否则，仅返回识别命中的单个人脸框。
-pub fn detect_targets_or_all_faces(image: &Image, threshold: f32) -> Result<Vec<Rect>, String> {
+pub fn detect_targets_or_all_faces(image: &Image) -> Result<Vec<Rect>, String> {
     let store = get_store().read().unwrap();
     if store.is_empty() {
         info!("[detect_targets_or_all_faces] no targets, fallback to detect all faces");
@@ -145,7 +141,7 @@ pub fn detect_targets_or_all_faces(image: &Image, threshold: f32) -> Result<Vec<
 
     info!("[detect_targets_or_all_faces] targets found, return only the best one");
     // 有目标，仅返回识别命中的那一个人脸框
-    match recognize_best(image, threshold)? {
+    match recognize_best(image)? {
         Some((rect, _person, _score)) => Ok(vec![rect]),
         None => Ok(Vec::new()),
     }

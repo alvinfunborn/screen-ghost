@@ -1,9 +1,6 @@
 use log::{error, info};
-use tauri::{AppHandle, Manager, WindowEvent, WebviewWindow};
-use tauri_plugin_autostart::MacosLauncher;
+use tauri::Manager;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 
 mod tray;
 mod autostart;
@@ -12,7 +9,8 @@ mod app_builder;
 mod app_state;
 pub use app_state::AppState;
 
-use crate::{system, utils::logger, ai::{face_detect, face_recognition}};
+use crate::{utils::logger, ai::{face_detect, face_recognition}};
+use crate::config;
 
 const LOG_LEVEL: &str = "debug";
 
@@ -25,13 +23,12 @@ pub fn run() {
             }
         }
     }
-    // // Initialize config first
-    // config::init_config();
-    // let config = config::get_config().unwrap();
-    // let config_for_manage = config.clone();
+    // Initialize config first
+    let cfg = config::init_config();
 
     // Initialize logger
-    let _ = logger::init_logger(LOG_LEVEL.to_string());
+    let log_level = cfg.system.as_ref().and_then(|s| s.log_level.clone()).unwrap_or_else(|| LOG_LEVEL.to_string());
+    let _ = logger::init_logger(log_level);
     
     // Initialize COM
     unsafe {
@@ -66,25 +63,9 @@ pub fn run() {
         AppState::set_global(app).expect("Failed to set global app instance");
         info!("[✓] global app instance set");
 
-        // // Handle window visibility
-        // if config.system.start_in_tray {
-        //     if let Err(e) = main_window.hide() {
-        //         error!("[✗] hide main window failed: {}", e);
-        //     }
-        //     info!("[✓] minimized to tray (if show_tray_icon is true)");
-        // } else {
-        //     if let Err(e) = main_window.show() {
-        //         error!("[✗] show main window failed: {}", e);
-        //     }
-        // }
-
         // Initialize panic handler
         panic_handler::setup_panic_handler(app_handle.clone());
         info!("[✓] panic handler initialized");
-
-        // // Initialize input hook
-        // input::hook::init(app_handle.clone());
-        // info!("[✓] input hook initialized");
 
         // set autostart
         autostart::set_auto_start(&app_handle).expect("Failed to setup auto start");

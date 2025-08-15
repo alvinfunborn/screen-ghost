@@ -1,7 +1,7 @@
 use log::info;
 use tauri::{image::Image, menu::{MenuBuilder, MenuItemBuilder}, tray::{TrayIconBuilder, TrayIconEvent}, AppHandle, Manager};
 
-const SHOW_TRAY_ICON: bool = true;
+const SHOW_TRAY_ICON: bool = false;
 
 pub fn setup_tray(
     app_handle: &AppHandle,

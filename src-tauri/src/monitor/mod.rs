@@ -2,7 +2,6 @@ pub mod monitor;
 pub use monitor::{MonitorInfo, Image};
 
 use log::{error, info};
-use tauri::WebviewWindow;
 use crate::app::AppState;
 
 // 获取所有显示器信息，按照x坐标排序

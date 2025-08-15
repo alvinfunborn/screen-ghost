@@ -32,33 +32,3 @@ pub fn apply_mosaic(rects: Vec<Rect>, scale_factor: f64) {
         error!("[apply_mosaic] Overlay window not found");
     }
 }
-
-pub fn hide_mosaic() {
-    info!("[hide_mosaic] Hiding all mosaics");
-    
-    // 获取overlay窗口并发送隐藏马赛克事件
-    if let Some(window) = crate::overlay::OverlayState::get_window() {
-        if let Err(e) = window.emit("hide-mosaic", ()) {
-            error!("[hide_mosaic] Failed to emit hide-mosaic event: {}", e);
-        } else {
-            info!("[hide_mosaic] Successfully sent hide-mosaic event to overlay");
-        }
-    } else {
-        error!("[hide_mosaic] Overlay window not found");
-    }
-}
-
-pub fn show_mosaic() {
-    info!("[show_mosaic] Showing mosaics");
-    
-    // 获取overlay窗口并发送显示马赛克事件
-    if let Some(window) = crate::overlay::OverlayState::get_window() {
-        if let Err(e) = window.emit("show-mosaic", ()) {
-            error!("[show_mosaic] Failed to emit show-mosaic event: {}", e);
-        } else {
-            info!("[show_mosaic] Successfully sent show-mosaic event to overlay");
-        }
-    } else {
-        error!("[show_mosaic] Overlay window not found");
-    }
-}

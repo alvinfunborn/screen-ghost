@@ -6,14 +6,9 @@ use log::{error, info};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use std::sync::Mutex;
 
-use crate::{ai::face_recognition, api::emitter, monitor::MonitorInfo, overlay};
-// use crate::ai::face_recognition;
+use crate::{ai::face_recognition, api::emitter, config, monitor::MonitorInfo, overlay};
 
 static THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
-
-// 截屏间隔, 单位ms
-const SCREEN_SHOT_INTERVAL: u64 = 100;
-const RECOGNITION_THRESHOLD: f32 = 0.55;
 
 pub async fn set_working_monitor(monitor: MonitorInfo) {
     overlay::create_overlay_window(&monitor).await;
@@ -36,6 +31,7 @@ pub fn stop_monitoring() {
 }
 
 pub fn run() {
+    let interval = config::get_config().unwrap().monitoring.unwrap().interval;
     if let Ok(mut guard) = THREAD.lock() {
         *guard = Some(std::thread::spawn(move || loop {
             unsafe {
@@ -46,7 +42,7 @@ pub fn run() {
                 }
             }
             cal();
-            std::thread::sleep(std::time::Duration::from_millis(SCREEN_SHOT_INTERVAL));
+            std::thread::sleep(std::time::Duration::from_millis(interval));
         }));
     }
 }
@@ -68,7 +64,7 @@ fn cal() {
         }
     };
 
-    match face_recognition::detect_targets_or_all_faces(&image, RECOGNITION_THRESHOLD) {
+    match face_recognition::detect_targets_or_all_faces(&image) {
         Ok(rects) => {
             if rects.is_empty() {
                 info!("[cal] no faces detected");

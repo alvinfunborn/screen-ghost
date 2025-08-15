@@ -1,0 +1,17 @@
+[face.detection]
+min_face_size = 64
+max_face_size = 800
+scale_factor = 1.2
+min_neighbors = 3
+confidence_threshold = 0.4
+use_gray = true
+image_scale = 0.8
+
+[face.recognition]
+threshold = 0.55
+
+[monitoring]
+interval = 66
+
+[system]
+log_level = "debug"

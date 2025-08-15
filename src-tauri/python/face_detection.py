@@ -391,6 +391,89 @@ def detect_faces_batch(images_data: List[Tuple[bytes, int, int]]) -> List[List[T
         print(f"Batch detection error: {e}")
         return [[] for _ in images_data]
 
+# 统一配置驱动的人脸检测
+def detect_faces_with_config(
+    image_data: bytes,
+    width: int,
+    height: int,
+    use_gray: bool,
+    image_scale: float,
+    min_face_size: int,
+    max_face_size: int,
+    scale_factor: float,
+    min_neighbors: int,
+    confidence_threshold: float,
+) -> List[Tuple[int, int, int, int]]:
+    try:
+        # 解码 BGRA 到所需颜色空间
+        if use_gray:
+            # 直接转灰度，避免多余转换
+            arr = np.frombuffer(image_data, dtype=np.uint8)
+            img = arr.reshape(height, width, 4)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+            working = gray
+        else:
+            arr = np.frombuffer(image_data, dtype=np.uint8)
+            img = arr.reshape(height, width, 4)
+            bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            working = bgr
+
+        # 可选缩放
+        scale = float(image_scale) if image_scale and image_scale > 0 else 1.0
+        if scale != 1.0:
+            new_w = max(1, int(width * scale))
+            new_h = max(1, int(height * scale))
+            working = cv2.resize(working, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            new_w, new_h = width, height
+
+        face_cascade = get_face_cascade()
+
+        # 选择输入（灰度或从 BGR 转灰）
+        if use_gray:
+            gray_input = working
+        else:
+            gray_input = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
+
+        # 均衡化提升鲁棒性
+        gray_input = cv2.equalizeHist(gray_input)
+
+        # 调整阈值与参数
+        min_size = (int(max(1, min_face_size)), int(max(1, min_face_size)))
+        max_size = (int(max(1, max_face_size)), int(max(1, max_face_size)))
+
+        faces = face_cascade.detectMultiScale(
+            gray_input,
+            scaleFactor=float(scale_factor),
+            minNeighbors=int(min_neighbors),
+            minSize=min_size,
+            maxSize=max_size,
+        )
+
+        # 置信度过滤 + NMS
+        thr = float(confidence_threshold) if confidence_threshold is not None else 0.0
+        filtered = post_process_faces(faces, confidence_threshold=thr)
+
+        # 若进行了缩放，将坐标还原到原图尺度
+        result: List[Tuple[int, int, int, int]] = []
+        inv_scale = 1.0 / scale if scale != 1.0 else 1.0
+        for (x, y, w, h) in filtered:
+            ox = int(x * inv_scale)
+            oy = int(y * inv_scale)
+            ow = int(w * inv_scale)
+            oh = int(h * inv_scale)
+            # 边界裁剪
+            ox = max(0, min(ox, width - 1))
+            oy = max(0, min(oy, height - 1))
+            ow = max(1, min(ow, width - ox))
+            oh = max(1, min(oh, height - oy))
+            result.append((ox, oy, ow, oh))
+
+        return result
+    except Exception as e:
+        print(f"detect_faces_with_config error: {e}")
+        return []
+
 def get_detection_stats() -> dict:
     """
     获取检测器统计信息

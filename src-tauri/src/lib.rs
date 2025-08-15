@@ -6,6 +6,7 @@ mod api;
 mod system;
 mod utils;
 mod ai;
+mod config;
 
 pub fn run() {
     app::run();
