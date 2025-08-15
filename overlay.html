@@ -6,7 +6,7 @@
     <title>Overlay</title>
     <style>
         body {
-            background: rgba(0, 123, 255, 0.1);
+            background: transparent;
             margin: 0;
             padding: 0;
             overflow: hidden;
@@ -20,14 +20,19 @@
         
         .mosaic {
             position: absolute;
-            background: repeating-conic-gradient(
-                #ff0000 0deg 90deg,
-                #00ff00 90deg 180deg
-            ) 0 0 / 10px 10px;
             pointer-events: none;
             z-index: 9999;
-            border: 1px solid #ffffff;
-            opacity: 0.8;
+            /* 默认样式：强遮挡 + 极淡网格，可被 inline 样式覆盖 */
+            box-sizing: border-box;
+            border: 0;
+            background:
+                linear-gradient(rgba(0, 0, 0, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 0, 0, 0.03) 1px, transparent 1px),
+                rgba(230, 230, 230, 1);
+            background-size: 12px 12px, 12px 12px, cover;
+            background-position: 0 0, 0 0, 0 0;
+            box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+            opacity: 1;
         }
         
         #test {
@@ -133,10 +138,38 @@
             }
             
             const rects = payload.mosaics;
+            const inlineStyleText = payload.mosaic_style;
             
             rects.forEach((rect, index) => {
                 const mosaic = document.createElement('div');
                 mosaic.className = 'mosaic';
+
+                // 如果后端提供了内联样式文本，解析后应用
+                if (typeof inlineStyleText === 'string' && inlineStyleText.trim().length > 0) {
+                    try {
+                        // 允许两种形式：
+                        // 1) 纯 CSS 声明块: "position:absolute; left:0; ..."
+                        // 2) 包裹在花括号中的块: "{ position:absolute; ... }"
+                        let cssText = inlineStyleText.trim();
+                        if (cssText.startsWith('{') && cssText.endsWith('}')) {
+                            cssText = cssText.slice(1, -1);
+                        }
+                        // 逐条解析 "key: value;" 到 style
+                        cssText.split(';').forEach(rule => {
+                            const pair = rule.trim();
+                            if (!pair) return;
+                            const idx = pair.indexOf(':');
+                            if (idx <= 0) return;
+                            const prop = pair.slice(0, idx).trim();
+                            const val = pair.slice(idx + 1).trim();
+                            // 将 kebab-case 转为 camelCase 以便直接赋值到 style
+                            const camel = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+                            try { mosaic.style[camel] = val; } catch (e) { /* 忽略非法属性 */ }
+                        });
+                    } catch (e) {
+                        console.warn('[Overlay] Failed to apply inline mosaic style:', e);
+                    }
+                }
                 
                 // 将物理像素坐标转换为逻辑像素坐标
                 const logicalX = rect.x / scaleFactor;

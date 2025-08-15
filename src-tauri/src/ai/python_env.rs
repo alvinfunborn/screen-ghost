@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::io::{self, Write};
+// removed unused io imports
 use std::env;
 use log::{info, warn, error};
 use once_cell::sync::OnceCell;
@@ -754,32 +754,7 @@ impl PythonEnvManager {
         }
     }
 
-    pub fn get_python_executable(&self) -> Option<PathBuf> {
-        // 优先使用系统Python
-        if let Some(ref system_python) = self.python_path {
-            return Some(system_python.clone());
-        }
-        
-        // 如果没有系统Python，使用虚拟环境
-        if let Some(ref venv_path) = self.virtual_env_path {
-            #[cfg(target_os = "windows")]
-            let python_name = "python.exe";
-            #[cfg(not(target_os = "windows"))]
-            let python_name = "python";
-            
-            let python_path = venv_path.join("Scripts").join(python_name);
-            if python_path.exists() {
-                return Some(python_path);
-            }
-            
-            let python_path = venv_path.join("bin").join(python_name);
-            if python_path.exists() {
-                return Some(python_path);
-            }
-        }
-        
-        None
-    }
+    // 移除未使用的 get_python_executable（对外提供全局函数即可）
 
     pub fn prepare_process_env(&self) {
         #[cfg(target_os = "windows")]
@@ -834,12 +809,13 @@ pub fn initialize_python_environment_with_app_handle(app_handle: &tauri::AppHand
     let mut manager = PythonEnvManager::new();
     manager.set_app_handle(app_handle.clone());
     manager.initialize()?;
+    // 将带有 app_handle 的已初始化管理器注册为全局单例，
+    // 确保后续 get_instance()/is_python_ready() 使用同一实例
+    let _ = PYTHON_ENV_MANAGER.set(manager);
     Ok(())
 }
 
-pub fn get_python_executable() -> Option<PathBuf> {
-    PythonEnvManager::get_instance().get_python_executable()
-}
+// 移除未使用的对外 get_python_executable 包装
 
 pub fn is_python_ready() -> bool {
     PythonEnvManager::get_instance().is_ready()

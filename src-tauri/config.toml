@@ -12,6 +12,27 @@ threshold = 0.55
 
 [monitoring]
 interval = 66
+mosaic_style = """
+{
+    position: absolute;
+    /* 强遮挡 + 极淡网格，无边框 */
+    background:
+      linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px),
+      rgba(230, 230, 230, 1);
+    background-size: 12px 12px, 12px 12px, cover;
+    background-position: 0 0, 0 0, 0 0;
+    background-blend-mode: normal, normal, normal;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.06);
+    border: 0;
+    border-radius: 6px;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 1;
+}
+"""
 
 [system]
-log_level = "debug"
+log_level = "info"

@@ -2,7 +2,7 @@ use crate::config;
 use crate::monitor::Image;
 use crate::utils::rect::Rect;
 use crate::ai::python_env;
-use log::{info, warn};
+use log::{debug, info, warn};
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -132,14 +132,14 @@ pub fn recognize_best(image: &Image) -> Result<Option<(Rect, String, f32)>, Stri
 pub fn detect_targets_or_all_faces(image: &Image) -> Result<Vec<Rect>, String> {
     let store = get_store().read().unwrap();
     if store.is_empty() {
-        info!("[detect_targets_or_all_faces] no targets, fallback to detect all faces");
+        debug!("[detect_targets_or_all_faces] no targets, fallback to detect all faces");
         // 无目标，回退为检测所有人脸
         let rects = crate::ai::face_detect::face_detect(image)?;
         return Ok(rects);
     }
     drop(store);
 
-    info!("[detect_targets_or_all_faces] targets found, return only the best one");
+    debug!("[detect_targets_or_all_faces] targets found, return only the best one");
     // 有目标，仅返回识别命中的那一个人脸框
     match recognize_best(image)? {
         Some((rect, _person, _score)) => Ok(vec![rect]),

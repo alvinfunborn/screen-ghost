@@ -2,7 +2,7 @@ mod monitor_state;
 
 pub use monitor_state::MonitorState;
 
-use log::{error, info};
+use log::{error, debug};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use std::sync::Mutex;
 
@@ -49,7 +49,7 @@ pub fn run() {
 
 fn cal() {
     let monitor = MonitorState::get_working();
-    info!("[cal] get working monitor: {monitor:?}");
+    debug!("[cal] get working monitor: {monitor:?}");
     if monitor.is_err() {
         error!("[cal] get working monitor failed: {monitor:?}");
         return;
@@ -67,7 +67,7 @@ fn cal() {
     match face_recognition::detect_targets_or_all_faces(&image) {
         Ok(rects) => {
             if rects.is_empty() {
-                info!("[cal] no faces detected");
+                debug!("[cal] no faces detected");
             }
             emitter::emit_frame_info(rects.clone());
 

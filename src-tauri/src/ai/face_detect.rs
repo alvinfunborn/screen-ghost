@@ -1,6 +1,6 @@
 use crate::{config::{self, DetectionConfig}, monitor::Image, utils::rect::Rect};
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 use std::sync::OnceLock;
 use crate::ai::python_env;
 
@@ -25,8 +25,8 @@ pub fn face_detect_with_config(
     let rects = convert_to_rects(faces, image.width, image.height);
     
     let elapsed = start_time.elapsed();
-    log::info!("[face_detect] Detection completed in {:?}, found {} faces (gray: {}, scale: {})", 
-               elapsed, rects.len(), config.use_gray, config.scale_factor);
+    log::debug!("[face_detect] Detection completed in {:?}, found {} faces (gray: {}, scale: {})", 
+                elapsed, rects.len(), config.use_gray, config.scale_factor);
     
     Ok(rects)
 }
@@ -34,43 +34,7 @@ pub fn face_detect_with_config(
 // 新增：灰度图像检测
 // 统一管道：通过 FaceDetectionConfig 配置 use_gray 与 image_scale 达到性能/实时效果
 
-#[allow(dead_code)]
-fn call_python_face_detection(image: &Image) -> Result<Vec<(i32, i32, i32, i32)>, String> {
-    // 确保Python环境已初始化
-    ensure_python_initialized()?;
-    
-    Python::with_gil(|py| {
-        // 获取Python文件路径
-        let python_files_path = python_env::get_python_files_path()
-            .map_err(|e| format!("Failed to get python files path: {}", e))?;
-        
-        // 设置Python路径
-        let path_setup = format!(
-            r#"
-import sys
-import os
-sys.path.insert(0, r'{}')
-"#,
-            python_files_path.to_string_lossy()
-        );
-        
-        py.run(&path_setup, None, None)
-            .map_err(|e| format!("Failed to setup Python path: {}", e))?;
-        
-        // 导入Python模块
-        let face_detection = py.import("face_detection")
-            .map_err(|e| format!("Failed to import face_detection module: {}", e))?;
-        
-        // 调用Python函数
-        let result: Vec<(i32, i32, i32, i32)> = face_detection
-            .call_method1("detect_faces", (PyBytes::new(py, &image.data), image.width, image.height))
-            .map_err(|e| format!("Failed to call Python function: {}", e))?
-            .extract()
-            .map_err(|e| format!("Failed to extract face detection result: {}", e))?;
-        
-        Ok(result)
-    })
-}
+// 移除未使用的旧接口 call_python_face_detection
 
 fn call_python_face_detection_with_config(
     image: &Image,
@@ -97,31 +61,74 @@ sys.path.insert(0, r'{}')
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
 
-        // 导入Python模块
-        let face_detection = py
-            .import("face_detection")
-            .map_err(|e| format!("Failed to import face_detection module: {}", e))?;
+        // 清理可能的旧缓存并刷新查找，避免加载到系统里同名模块
+        let _ = py.run(
+            "import sys, importlib; sys.modules.pop('face_detection', None); importlib.invalidate_caches()",
+            None,
+            None,
+        );
 
-        // 调用统一配置函数
-        let result: Vec<(i32, i32, i32, i32)> = face_detection
-            .call_method1(
-                "detect_faces_with_config",
-                (
-                    PyBytes::new(py, &image.data),
-                    image.width,
-                    image.height,
-                    config.use_gray,
-                    config.image_scale,
-                    config.min_face_size,
-                    config.max_face_size,
-                    config.scale_factor,
-                    config.min_neighbors,
-                    config.confidence_threshold,
-                ),
-            )
-            .map_err(|e| format!("Failed to call detect_faces_with_config: {}", e))?
-            .extract()
-            .map_err(|e| format!("Failed to extract detect_faces_with_config result: {}", e))?;
+        // 导入并尽量刷新Python模块，避免旧缓存
+        let face_detection = {
+            // 先尝试普通导入
+            let module = py.import("face_detection")
+                .map_err(|e| format!("Failed to import face_detection module: {}", e))?;
+            // 尝试 importlib.reload，确保最新脚本生效（忽略 reload 失败）
+            let locals = PyDict::new(py);
+            let _ = locals.set_item("face_detection", module);
+            let _ = py.run(
+                r#"
+import importlib
+try:
+    importlib.reload(face_detection)
+except Exception:
+    pass
+"#,
+                None,
+                Some(locals),
+            );
+            // 记录模块来源路径，便于诊断是否加载到正确的脚本
+            if let Ok(file_attr) = module.getattr("__file__") {
+                if let Ok(py_str) = file_attr.str() {
+                    if let Ok(path) = py_str.to_str() {
+                        log::info!("[face_detect] loaded face_detection from: {}", path);
+                    }
+                }
+            }
+            module
+        };
+
+        // 优先调用统一配置函数；若不存在则回退到旧版 detect_faces
+        let call_args = (
+            PyBytes::new(py, &image.data),
+            image.width,
+            image.height,
+            config.use_gray,
+            config.image_scale,
+            config.min_face_size,
+            config.max_face_size,
+            config.scale_factor,
+            config.min_neighbors,
+            config.confidence_threshold,
+        );
+
+        let result: Vec<(i32, i32, i32, i32)> = match face_detection.call_method1("detect_faces_with_config", call_args) {
+            Ok(obj) => obj
+                .extract()
+                .map_err(|e| format!("Failed to extract detect_faces_with_config result: {}", e))?,
+            Err(e) => {
+                // 如果方法不存在或调用失败，尝试回退到老接口
+                log::warn!("detect_faces_with_config unavailable ({}), fallback to detect_faces", e);
+                face_detection
+                    .call_method1(
+                        "detect_faces",
+                        (PyBytes::new(py, &image.data), image.width, image.height),
+                    )
+                    .map_err(|e2| format!("Failed to call fallback detect_faces: {}", e2))?
+                    .extract()
+                    .map_err(|e2| format!("Failed to extract fallback detect_faces result: {}", e2))?
+            }
+        };
 
         Ok(result)
     })
@@ -137,6 +144,8 @@ fn ensure_python_initialized() -> Result<(), String> {
     
     // 使用新的Python环境管理器
     python_env::initialize_python_environment()?;
+    // 确保进程环境包含所选 Python 的目录（Windows: PATH/PYTHONHOME 等）
+    python_env::PythonEnvManager::get_instance().prepare_process_env();
     
     // 验证Python环境是否可用
     if !python_env::is_python_ready() {
@@ -197,65 +206,13 @@ fn convert_to_rects(faces: Vec<(i32, i32, i32, i32)>, image_width: i32, image_he
 // —— 统一化后，移除了批量/实时/高性能等多管道的公开入口 ——
 
 // 新增：调用Python灰度检测函数
-#[allow(dead_code)]
-fn call_python_face_detection_gray(image: &Image, scale: f32) -> Result<Vec<(i32, i32, i32, i32)>, String> {
-    // 转换为灰度图像
-    let gray_data = convert_to_gray(image);
-    call_python_face_detection_gray_raw(&gray_data, image.width, image.height, scale)
-}
+// 移除未使用的灰度辅助入口 call_python_face_detection_gray
 
 // 新增：调用Python灰度检测函数（原始灰度数据）
-#[allow(dead_code)]
-fn call_python_face_detection_gray_raw(gray_data: &[u8], width: i32, height: i32, scale: f32) -> Result<Vec<(i32, i32, i32, i32)>, String> {
-    ensure_python_initialized()?;
-    
-    Python::with_gil(|py| {
-        let python_files_path = python_env::get_python_files_path()
-            .map_err(|e| format!("Failed to get python files path: {}", e))?;
-        
-        let path_setup = format!(
-            r#"
-import sys
-import os
-sys.path.insert(0, r'{}')
-"#,
-            python_files_path.to_string_lossy()
-        );
-        
-        py.run(&path_setup, None, None)
-            .map_err(|e| format!("Failed to setup Python path: {}", e))?;
-        
-        let face_detection = py.import("face_detection")
-            .map_err(|e| format!("Failed to import face_detection module: {}", e))?;
-        
-        let result: Vec<(i32, i32, i32, i32)> = face_detection
-            .call_method1("detect_faces_gray", (PyBytes::new(py, gray_data), width, height, scale))
-            .map_err(|e| format!("Failed to call Python detect_faces_gray function: {}", e))?
-            .extract()
-            .map_err(|e| format!("Failed to extract face detection result: {}", e))?;
-        
-        Ok(result)
-    })
-}
+// 移除未使用的灰度底层入口 call_python_face_detection_gray_raw
 
 // 新增：图像转换为灰度
-#[allow(dead_code)]
-fn convert_to_gray(image: &Image) -> Vec<u8> {
-    let mut gray_data = Vec::with_capacity((image.width * image.height) as usize);
-    
-    for i in 0..image.data.len() / 4 {
-        let offset = i * 4;
-        let b = image.data[offset] as f32;
-        let g = image.data[offset + 1] as f32;
-        let r = image.data[offset + 2] as f32;
-        
-        // 使用标准灰度转换公式：Y = 0.299*R + 0.587*G + 0.114*B
-        let gray = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-        gray_data.push(gray);
-    }
-    
-    gray_data
-}
+// 移除未使用的图像灰度转换辅助 convert_to_gray
 
 // 初始化Python环境
 #[allow(dead_code)]

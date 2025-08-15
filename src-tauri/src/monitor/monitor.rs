@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING};
 use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY};
@@ -167,14 +167,14 @@ impl MonitorInfo {
             Ok(image) => {
                 // 检查是否获取到有效内容（不是全零）
                 if self.has_valid_content(&image) {
-                    info!("[screen_shot] DirectX method succeeded");
+                    debug!("[screen_shot] DirectX method succeeded");
                     return Ok(image);
                 } else {
-                    warn!("[screen_shot] DirectX method returned blank content, using GDI fallback");
+                    debug!("[screen_shot] DirectX method returned blank content, using GDI fallback");
                 }
             }
             Err(e) => {
-                warn!("[screen_shot] DirectX method failed: {}, using GDI fallback", e);
+                debug!("[screen_shot] DirectX method failed: {}, using GDI fallback", e);
             }
         }
 
@@ -186,7 +186,7 @@ impl MonitorInfo {
         unsafe {
             // 设置DPI感知为每显示器感知
             if let Err(e) = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) {
-                warn!("[set_dpi_awareness] Failed to set DPI awareness: {}", e);
+                debug!("[set_dpi_awareness] Failed to set DPI awareness: {}", e);
             }
         }
     }
@@ -222,7 +222,7 @@ impl MonitorInfo {
             if mem_dc.is_invalid() {
                 let released = ReleaseDC(Some(desktop), dc);
                 if released == 0 {
-                    warn!("[screen_shot_gdi] ReleaseDC failed when mem_dc invalid");
+                    debug!("[screen_shot_gdi] ReleaseDC failed when mem_dc invalid");
                 }
                 return Err("Failed to create compatible DC".to_string());
             }
@@ -230,9 +230,9 @@ impl MonitorInfo {
             let bitmap = CreateCompatibleBitmap(dc, self.width, self.height);
             if bitmap.is_invalid() {
                 let ok = DeleteDC(mem_dc).as_bool();
-                if !ok { warn!("[screen_shot_gdi] DeleteDC failed after CreateCompatibleBitmap error"); }
+                if !ok { debug!("[screen_shot_gdi] DeleteDC failed after CreateCompatibleBitmap error"); }
                 let released = ReleaseDC(Some(desktop), dc);
-                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after CreateCompatibleBitmap error"); }
+                if released == 0 { debug!("[screen_shot_gdi] ReleaseDC failed after CreateCompatibleBitmap error"); }
                 return Err("Failed to create compatible bitmap".to_string());
             }
 
@@ -240,11 +240,11 @@ impl MonitorInfo {
             let old_bitmap = SelectObject(mem_dc, bitmap.into());
             if old_bitmap.is_invalid() {
                 let ok1 = DeleteObject(bitmap.into()).as_bool();
-                if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed after SelectObject error"); }
+                if !ok1 { debug!("[screen_shot_gdi] DeleteObject failed after SelectObject error"); }
                 let ok2 = DeleteDC(mem_dc).as_bool();
-                if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed after SelectObject error"); }
+                if !ok2 { debug!("[screen_shot_gdi] DeleteDC failed after SelectObject error"); }
                 let released = ReleaseDC(Some(desktop), dc);
-                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after SelectObject error"); }
+                if released == 0 { debug!("[screen_shot_gdi] ReleaseDC failed after SelectObject error"); }
                 return Err("Failed to select bitmap".to_string());
             }
 
@@ -264,11 +264,11 @@ impl MonitorInfo {
             if result.is_err() {
                 let _ = SelectObject(mem_dc, old_bitmap);
                 let ok1 = DeleteObject(bitmap.into()).as_bool();
-                if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed after BitBlt error"); }
+                if !ok1 { debug!("[screen_shot_gdi] DeleteObject failed after BitBlt error"); }
                 let ok2 = DeleteDC(mem_dc).as_bool();
-                if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed after BitBlt error"); }
+                if !ok2 { debug!("[screen_shot_gdi] DeleteDC failed after BitBlt error"); }
                 let released = ReleaseDC(Some(desktop), dc);
-                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after BitBlt error"); }
+                if released == 0 { debug!("[screen_shot_gdi] ReleaseDC failed after BitBlt error"); }
                 return Err("BitBlt failed".to_string());
             }
 
@@ -308,25 +308,25 @@ impl MonitorInfo {
             if lines == 0 {
                 let _ = SelectObject(mem_dc, old_bitmap);
                 let ok1 = DeleteObject(bitmap.into()).as_bool();
-                if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed after GetDIBits error"); }
+                if !ok1 { debug!("[screen_shot_gdi] DeleteObject failed after GetDIBits error"); }
                 let ok2 = DeleteDC(mem_dc).as_bool();
-                if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed after GetDIBits error"); }
+                if !ok2 { debug!("[screen_shot_gdi] DeleteDC failed after GetDIBits error"); }
                 let released = ReleaseDC(Some(desktop), dc);
-                if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed after GetDIBits error"); }
+                if released == 0 { debug!("[screen_shot_gdi] ReleaseDC failed after GetDIBits error"); }
                 return Err("GetDIBits failed".to_string());
             }
 
             // 清理资源
             let _ = SelectObject(mem_dc, old_bitmap);
             let ok1 = DeleteObject(bitmap.into()).as_bool();
-            if !ok1 { warn!("[screen_shot_gdi] DeleteObject failed during cleanup"); }
+            if !ok1 { debug!("[screen_shot_gdi] DeleteObject failed during cleanup"); }
             let ok2 = DeleteDC(mem_dc).as_bool();
-            if !ok2 { warn!("[screen_shot_gdi] DeleteDC failed during cleanup"); }
+            if !ok2 { debug!("[screen_shot_gdi] DeleteDC failed during cleanup"); }
             let released = ReleaseDC(Some(desktop), dc);
-            if released == 0 { warn!("[screen_shot_gdi] ReleaseDC failed during cleanup"); }
+            if released == 0 { debug!("[screen_shot_gdi] ReleaseDC failed during cleanup"); }
 
             let elapsed = start_time.elapsed();
-            info!("[screen_shot_gdi] GDI screenshot completed in {:?}: {}x{}", elapsed, self.width, self.height);
+            debug!("[screen_shot_gdi] GDI screenshot completed in {:?}: {}x{}", elapsed, self.width, self.height);
 
             Ok(Image {
                 width: self.width,
@@ -338,49 +338,49 @@ impl MonitorInfo {
 
     fn screen_shot_directx(&self) -> Result<Image, String> {
         // 首先尝试优化的 DirectX 方法
-        info!("[screen_shot_directx] Trying optimized method");
+        debug!("[screen_shot_directx] Trying optimized method");
         match self.screen_shot_directx_optimized() {
             Ok(image) => {
                 if self.has_valid_content(&image) {
-                    info!("[screen_shot_directx] Optimized method succeeded");
+                    debug!("[screen_shot_directx] Optimized method succeeded");
                     return Ok(image);
                 } else {
-                    warn!("[screen_shot_directx] Optimized method returned blank content");
+                    debug!("[screen_shot_directx] Optimized method returned blank content");
                 }
             }
             Err(e) => {
-                warn!("[screen_shot_directx] Optimized method failed: {}, trying standard method", e);
+                debug!("[screen_shot_directx] Optimized method failed: {}, trying standard method", e);
             }
         }
         
         // 尝试多种DirectX方法
-        info!("[screen_shot_directx] Trying standard method");
+        debug!("[screen_shot_directx] Trying standard method");
         match self.screen_shot_directx_standard() {
             Ok(image) => {
                 if self.has_valid_content(&image) {
-                    info!("[screen_shot_directx] Standard method succeeded");
+                    debug!("[screen_shot_directx] Standard method succeeded");
                     return Ok(image);
                 } else {
-                    warn!("[screen_shot_directx] Standard method returned blank content");
+                    debug!("[screen_shot_directx] Standard method returned blank content");
                 }
             }
             Err(e) => {
-                warn!("[screen_shot_directx] Standard method failed: {}", e);
+                debug!("[screen_shot_directx] Standard method failed: {}", e);
             }
         }
         
-        info!("[screen_shot_directx] Trying alternative method");
+        debug!("[screen_shot_directx] Trying alternative method");
         match self.screen_shot_directx_alternative() {
             Ok(image) => {
                 if self.has_valid_content(&image) {
-                    info!("[screen_shot_directx] Alternative method succeeded");
+                    debug!("[screen_shot_directx] Alternative method succeeded");
                     return Ok(image);
                 } else {
-                    warn!("[screen_shot_directx] Alternative method returned blank content");
+                    debug!("[screen_shot_directx] Alternative method returned blank content");
                 }
             }
             Err(e) => {
-                warn!("[screen_shot_directx] Alternative method failed: {}", e);
+                debug!("[screen_shot_directx] Alternative method failed: {}", e);
             }
         }
         
@@ -436,7 +436,7 @@ impl MonitorInfo {
                     let height_match = (self.height - oh).abs() <= 10;
                     
                     if self.x == ox && self.y == oy && width_match && height_match {
-                        info!("[screen_shot_directx_optimized] Found matching output: Adapter={}, Output={}", i, j);
+                        debug!("[screen_shot_directx_optimized] Found matching output: Adapter={}, Output={}", i, j);
                         _adapter = Some(a.clone());
                         output = Some(o);
                         found = true;
@@ -468,7 +468,7 @@ impl MonitorInfo {
                 match output1.DuplicateOutput(&device) {
                     Ok(dup) => {
                         duplication = Some(dup);
-                        info!("[screen_shot_directx_optimized] Output duplication created on attempt {}", retry_count + 1);
+                        debug!("[screen_shot_directx_optimized] Output duplication created on attempt {}", retry_count + 1);
                     }
                     Err(e) => {
                         retry_count += 1;
@@ -493,7 +493,7 @@ impl MonitorInfo {
             
             // 检查是否有累积帧
             if frame_info.AccumulatedFrames == 0 {
-                warn!("[screen_shot_directx_optimized] No accumulated frames");
+                debug!("[screen_shot_directx_optimized] No accumulated frames");
             }
             
             // 拷贝到复用的 staging texture
@@ -534,7 +534,7 @@ impl MonitorInfo {
             duplication.ReleaseFrame().ok();
             
             let elapsed = start_time.elapsed();
-            info!("[screen_shot_directx_optimized] Optimized DirectX screenshot completed in {:?}: {}x{}", elapsed, width, height);
+            debug!("[screen_shot_directx_optimized] Optimized DirectX screenshot completed in {:?}: {}x{}", elapsed, width, height);
             
             Ok(Image {
                 width: width as i32,
@@ -546,11 +546,11 @@ impl MonitorInfo {
 
     fn screen_shot_directx_standard(&self) -> Result<Image, String> {
         unsafe {
-            info!("[screen_shot_directx_standard] Starting standard DirectX method...");
+            debug!("[screen_shot_directx_standard] Starting standard DirectX method...");
             
             // 检查DPI感知
             if self.scale_factor != 1.0 {
-                warn!("[screen_shot_directx_standard] High DPI monitor detected (scale_factor={})", self.scale_factor);
+                debug!("[screen_shot_directx_standard] High DPI monitor detected (scale_factor={})", self.scale_factor);
             }
             
             // 2. 创建DXGI工厂
@@ -580,7 +580,7 @@ impl MonitorInfo {
                     let height_match = (self.height - oh).abs() <= 10;
                     
                     if self.x == ox && self.y == oy && width_match && height_match {
-                        info!("[screen_shot_directx_standard] Found matching output: Adapter={}, Output={}", i, j);
+                        debug!("[screen_shot_directx_standard] Found matching output: Adapter={}, Output={}", i, j);
                         adapter = Some(a.clone());
                         output = Some(o);
                         found = true;
@@ -632,7 +632,7 @@ impl MonitorInfo {
                 match output1.DuplicateOutput(&device) {
                     Ok(dup) => {
                         duplication = Some(dup);
-                        info!("[screen_shot_directx_standard] Output duplication created on attempt {}", retry_count + 1);
+                        debug!("[screen_shot_directx_standard] Output duplication created on attempt {}", retry_count + 1);
                     }
                     Err(e) => {
                         retry_count += 1;
@@ -657,7 +657,7 @@ impl MonitorInfo {
             
             // 检查是否有累积帧
             if frame_info.AccumulatedFrames == 0 {
-                warn!("[screen_shot_directx_standard] No accumulated frames");
+                debug!("[screen_shot_directx_standard] No accumulated frames");
             }
             
             // 7. 拷贝到CPU可读的Texture2D
@@ -697,13 +697,13 @@ impl MonitorInfo {
             }
             
             if !has_non_zero {
-                warn!("[screen_shot_directx_standard] All sampled pixels are zero");
+                debug!("[screen_shot_directx_standard] All sampled pixels are zero");
             }
             
             context.Unmap(&cpu_tex, 0);
             duplication.ReleaseFrame().ok();
             
-            info!("[screen_shot_directx_standard] DirectX screenshot completed: {}x{}", desc.Width, desc.Height);
+            debug!("[screen_shot_directx_standard] DirectX screenshot completed: {}x{}", desc.Width, desc.Height);
             
             Ok(Image {
                 width: desc.Width as i32,
@@ -715,12 +715,12 @@ impl MonitorInfo {
 
     fn screen_shot_directx_alternative(&self) -> Result<Image, String> {
         unsafe {
-            info!("[screen_shot_directx_alternative] Starting alternative method...");
+            debug!("[screen_shot_directx_alternative] Starting alternative method...");
             
             // 初始化COM
             let co_init_result = CoInitializeEx(None, COINIT_MULTITHREADED);
             if co_init_result.is_err() {
-                warn!("[screen_shot_directx_alternative] CoInitializeEx failed");
+                debug!("[screen_shot_directx_alternative] CoInitializeEx failed");
             }
             
             // 创建DXGI工厂
@@ -800,7 +800,7 @@ impl MonitorInfo {
                 match output1.DuplicateOutput(&device) {
                     Ok(dup) => {
                         duplication = Some(dup);
-                        info!("[screen_shot_directx_alternative] Output duplication created on attempt {}", retry_count + 1);
+                        debug!("[screen_shot_directx_alternative] Output duplication created on attempt {}", retry_count + 1);
                     }
                     Err(e) => {
                         retry_count += 1;
@@ -825,7 +825,7 @@ impl MonitorInfo {
                 if hr.is_ok() && resource.is_some() {
                     // 如果有累积帧，继续处理
                     if frame_info.AccumulatedFrames > 0 {
-                        info!("[screen_shot_directx_alternative] Frame acquired with {} accumulated frames", frame_info.AccumulatedFrames);
+                        debug!("[screen_shot_directx_alternative] Frame acquired with {} accumulated frames", frame_info.AccumulatedFrames);
                         break;
                     }
                 }
@@ -881,7 +881,7 @@ impl MonitorInfo {
             context.Unmap(&cpu_tex, 0);
             duplication.ReleaseFrame().ok();
             
-            info!("[screen_shot_directx_alternative] Alternative method completed: {}x{}", desc.Width, desc.Height);
+            debug!("[screen_shot_directx_alternative] Alternative method completed: {}x{}", desc.Width, desc.Height);
             
             Ok(Image {
                 width: desc.Width as i32,
