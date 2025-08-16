@@ -316,11 +316,21 @@ impl PythonEnvManager {
             .arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
 
-        // 识别依赖：CPU 默认 onnxruntime；如需 GPU/DML 可后续扩展
+        // 识别依赖：根据 provider 选择 onnxruntime 变体
+        let provider = crate::config::get_config()
+            .and_then(|c| c.face)
+            .and_then(|f| f.recognition.provider)
+            .unwrap_or_else(|| "cpu".to_string())
+            .to_lowercase();
+        let ort_pkg = match provider.as_str() {
+            "cuda" => "onnxruntime-gpu",
+            "dml" => "onnxruntime-directml",
+            _ => "onnxruntime",
+        };
         let required_packages = [
             "opencv-python",
             "numpy",
-            "onnxruntime",
+            ort_pkg,
             "insightface",
         ];
         let app_handle = self.app_handle.clone();
@@ -493,8 +503,18 @@ impl PythonEnvManager {
             .arg("-m").arg("pip").arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
 
-        // 安装识别所需
-        let required_packages = ["opencv-python", "numpy", "onnxruntime", "insightface"];
+        // 安装识别所需（根据 provider 选择 onnxruntime 变体）
+        let provider = crate::config::get_config()
+            .and_then(|c| c.face)
+            .and_then(|f| f.recognition.provider)
+            .unwrap_or_else(|| "cpu".to_string())
+            .to_lowercase();
+        let ort_pkg = match provider.as_str() {
+            "cuda" => "onnxruntime-gpu",
+            "dml" => "onnxruntime-directml",
+            _ => "onnxruntime",
+        };
+        let required_packages = ["opencv-python", "numpy", ort_pkg, "insightface"];
         let app_handle = self.app_handle.clone();
         
         // 发送开始安装事件

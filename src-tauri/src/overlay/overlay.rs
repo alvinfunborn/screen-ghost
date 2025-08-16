@@ -1,32 +1,35 @@
 use crate::mosaic::Mosaic;
 use crate::utils::rect::Rect;
 use tauri::Emitter;
-use log::{debug, error};
-use crate::config; // 读取配置中的 mosaic_style
+use log::{error, info};
+// 样式在窗口创建时一次性下发，apply_mosaic 不再读取样式
 
 pub fn apply_mosaic(rects: Vec<Rect>, scale_factor: f64) {
-    // 将Rect转换为Mosaic
-    let mosaics: Vec<Mosaic> = rects.into_iter()
-        .map(|rect| Mosaic {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
+    // 在发送给 overlay 前进行缩放：保持中心不变
+    // 公式：w' = w*s, h' = h*s, x' = x - (w' - w)/2, y' = y - (h' - h)/2
+    let s = scale_factor as f32;
+    let mosaics: Vec<Mosaic> = rects
+        .into_iter()
+        .map(|rect| {
+            let new_w_f = (rect.width as f32) * s;
+            let new_h_f = (rect.height as f32) * s;
+            let dx = ((new_w_f - rect.width as f32) / 2.0).round() as i32;
+            let dy = ((new_h_f - rect.height as f32) / 2.0).round() as i32;
+            let w = new_w_f.round() as i32;
+            let h = new_h_f.round() as i32;
+            let x = rect.x - dx;
+            let y = rect.y - dy;
+            Mosaic { x, y, width: w, height: h }
         })
         .collect();
     
-    debug!("[apply_mosaic] Applying {:?} mosaics with scale_factor: {}", mosaics, scale_factor);
+    info!("[apply_mosaic] Applying {:?} mosaics with scale_factor: {}", mosaics, scale_factor);
     
-    // 获取overlay窗口并发送马赛克数据和scale_factor
+    // 获取overlay窗口并发送马赛克数据和scale_factor（不再携带样式）
     if let Some(window) = crate::overlay::OverlayState::get_window() {
-        // 读取配置中的 mosaic_style（可选）
-        let mosaic_style = config::get_config()
-            .and_then(|cfg| cfg.monitoring.and_then(|m| m.mosaic_style));
-
         let payload = serde_json::json!({
             "mosaics": mosaics,
-            "scale_factor": scale_factor,
-            "mosaic_style": mosaic_style
+            "scale_factor": scale_factor
         });
         
         if let Err(e) = window.emit("apply-mosaic", &payload) {

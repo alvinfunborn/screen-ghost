@@ -22,16 +22,11 @@
             position: absolute;
             pointer-events: none;
             z-index: 9999;
-            /* 默认样式：强遮挡 + 极淡网格，可被 inline 样式覆盖 */
+            /* 默认样式：完全透明，由后端内联样式完全控制 */
             box-sizing: border-box;
             border: 0;
-            background:
-                linear-gradient(rgba(201, 126, 99, 0.35) 2px, transparent 2px),
-                linear-gradient(90deg, rgba(201, 126, 99, 0.35) 2px, transparent 2px),
-                #F5D7C6;
-            background-size: 32px 32px, 32px 32px, cover;
-            background-position: 0 0, 0 0, 0 0;
-            box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+            background: transparent;
+            background-color: transparent;
             opacity: 1;
         }
         
@@ -89,6 +84,8 @@
         let mosaics = [];
         const mosaicContainer = document.getElementById('mosaic-container');
         const debugInfo = document.getElementById('debug-info');
+        // 全局样式文本，由后端在窗口创建后一次性下发
+        let globalMosaicStyle = '';
         
         // 动态DPI缩放因子
         let scaleFactor = 1.0; // 默认值
@@ -138,38 +135,12 @@
             }
             
             const rects = payload.mosaics;
-            const inlineStyleText = payload.mosaic_style;
             
             rects.forEach((rect, index) => {
                 const mosaic = document.createElement('div');
                 mosaic.className = 'mosaic';
 
-                // 如果后端提供了内联样式文本，解析后应用
-                if (typeof inlineStyleText === 'string' && inlineStyleText.trim().length > 0) {
-                    try {
-                        // 允许两种形式：
-                        // 1) 纯 CSS 声明块: "position:absolute; left:0; ..."
-                        // 2) 包裹在花括号中的块: "{ position:absolute; ... }"
-                        let cssText = inlineStyleText.trim();
-                        if (cssText.startsWith('{') && cssText.endsWith('}')) {
-                            cssText = cssText.slice(1, -1);
-                        }
-                        // 逐条解析 "key: value;" 到 style
-                        cssText.split(';').forEach(rule => {
-                            const pair = rule.trim();
-                            if (!pair) return;
-                            const idx = pair.indexOf(':');
-                            if (idx <= 0) return;
-                            const prop = pair.slice(0, idx).trim();
-                            const val = pair.slice(idx + 1).trim();
-                            // 将 kebab-case 转为 camelCase 以便直接赋值到 style
-                            const camel = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-                            try { mosaic.style[camel] = val; } catch (e) { /* 忽略非法属性 */ }
-                        });
-                    } catch (e) {
-                        console.warn('[Overlay] Failed to apply inline mosaic style:', e);
-                    }
-                }
+                // 样式已在初始化时写入到 <style>，无需逐元素设置
                 
                 // 将物理像素坐标转换为逻辑像素坐标
                 const logicalX = rect.x / scaleFactor;
@@ -207,6 +178,34 @@
                     applyMosaics(event.payload);
                 });
                 console.log('[Overlay] apply-mosaic listener set');
+
+                // 初始化时拉取一次样式
+                async function loadGlobalMosaicStyle() {
+                    try {
+                        const style = await invoke('get_mosaic_style');
+                        if (typeof style === 'string') {
+                            globalMosaicStyle = style;
+                            // 将 CSS 声明块注入为 .mosaic 选择器样式
+                            const styleTagId = 'mosaic-style';
+                            const prev = document.getElementById(styleTagId);
+                            if (prev) prev.remove();
+                            let cssText = globalMosaicStyle.trim();
+                            if (cssText.startsWith('{') && cssText.endsWith('}')) {
+                                cssText = cssText.slice(1, -1);
+                            }
+                            const tag = document.createElement('style');
+                            tag.id = styleTagId;
+                            tag.textContent = `.mosaic { ${cssText} }`;
+                            document.head.appendChild(tag);
+                            console.log('[Overlay] Injected global mosaic CSS into <style>#mosaic-style');
+                        } else {
+                            console.log('[Overlay] No mosaic style returned, keep transparent default');
+                        }
+                    } catch (e) {
+                        console.warn('[Overlay] Failed to load mosaic style via invoke:', e);
+                    }
+                }
+                await loadGlobalMosaicStyle();
                 
                 // 设置 show-mosaic 事件监听
                 const unlistenShow = await currentWindow.listen('show-mosaic', (event) => {

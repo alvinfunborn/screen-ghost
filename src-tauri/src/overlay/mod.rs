@@ -16,6 +16,7 @@ use windows::Win32::{
 };
 
 use crate::{app::AppState, monitor::MonitorInfo};
+// 不再在创建时下发样式，前端会在初始化时 invoke 获取
 
 pub async fn create_overlay_window(
     monitor: &MonitorInfo,
@@ -83,6 +84,8 @@ pub async fn create_overlay_window(
     
     OverlayState::set_window(window.clone());
     info!("[create_overlay_window] Window stored in OverlayState");
+
+    // 样式获取改由前端初始化时通过 invoke('get_mosaic_style') 完成
     
     info!("[create_overlay_window] Setting window position to ({}, {})", position_x, position_y);
     if let Err(e) = window.set_position(tauri::PhysicalPosition::new(position_x, position_y)) {
