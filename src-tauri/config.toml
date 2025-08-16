@@ -9,18 +9,20 @@ image_scale = 0.8
 
 [face.recognition]
 threshold = 0.55
+outlier_threshold = 0.3
+outlier_iter = 2
 
 [monitoring]
-interval = 66
+interval = 0
 mosaic_style = """
 {
     position: absolute;
-    /* 强遮挡 + 极淡网格，无边框 */
+    /* 深肉色网格线 + 淡肉色底色，大网格 */
     background:
-      linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px),
-      rgba(230, 230, 230, 1);
-    background-size: 12px 12px, 12px 12px, cover;
+      linear-gradient(rgba(201,126,99,0.35) 2px, transparent 2px),
+      linear-gradient(90deg, rgba(201,126,99,0.35) 2px, transparent 2px),
+      #F5D7C6;
+    background-size: 32px 32px, 32px 32px, cover;
     background-position: 0 0, 0 0, 0 0;
     background-blend-mode: normal, normal, normal;
     backdrop-filter: none;

@@ -116,7 +116,7 @@ impl PythonEnvManager {
         self.virtual_env_path = Some(virtual_env_path.clone());
         info!("Created virtual environment at: {:?}", virtual_env_path);
 
-        // 5. 安装必要的包
+        // 5. 安装必要的包（包含识别依赖 insightface 与 onnxruntime）
         emitter::emit_toast("正在安装必要依赖…");
         self.install_required_packages(&virtual_env_path)?;
 
@@ -252,7 +252,8 @@ impl PythonEnvManager {
     }
 
     fn check_system_python_requirements(&self, python_path: &Path) -> Result<bool, String> {
-        let required_packages = ["cv2", "numpy"];
+        // 强制依赖：opencv + numpy + onnxruntime + insightface
+        let required_packages = ["cv2", "numpy", "onnxruntime", "insightface"];
         
         for package in &required_packages {
             let result = Command::new(python_path)
@@ -310,7 +311,18 @@ impl PythonEnvManager {
 
     fn install_required_packages(&self, venv_path: &Path) -> Result<(), String> {
         let pip_path = self.get_pip_path(venv_path)?;
-        let required_packages = ["opencv-python", "numpy"];
+        // 先升级 pip/setuptools/wheel 提高兼容性
+        let _ = Command::new(&pip_path)
+            .arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+
+        // 识别依赖：CPU 默认 onnxruntime；如需 GPU/DML 可后续扩展
+        let required_packages = [
+            "opencv-python",
+            "numpy",
+            "onnxruntime",
+            "insightface",
+        ];
         let app_handle = self.app_handle.clone();
         
         // 发送开始安装事件
@@ -476,7 +488,13 @@ impl PythonEnvManager {
     }
 
     fn install_packages_in_system_python(&self, python_path: &Path) -> Result<bool, String> {
-        let required_packages = ["opencv-python", "numpy"];
+        // 先升级 pip/setuptools/wheel
+        let _ = Command::new(python_path)
+            .arg("-m").arg("pip").arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+
+        // 安装识别所需
+        let required_packages = ["opencv-python", "numpy", "onnxruntime", "insightface"];
         let app_handle = self.app_handle.clone();
         
         // 发送开始安装事件
@@ -663,22 +681,42 @@ impl PythonEnvManager {
                 .map_err(|e| format!("Failed to create python files directory: {}", e))?;
         }
         
-        // 开发环境：每次启动都覆盖拷贝，确保新增/更新的脚本可用（例如新增的 face_recognition.py）
+        // 辅助：查找源码目录 src-tauri/python 的多重候选位置
+        fn candidate_src_dirs() -> Vec<PathBuf> {
+            let mut cands: Vec<PathBuf> = Vec::new();
+            // 相对当前工作目录
+            cands.push(PathBuf::from("python"));
+            cands.push(PathBuf::from("src-tauri/python"));
+            cands.push(PathBuf::from("../src-tauri/python"));
+            cands.push(PathBuf::from("../../src-tauri/python"));
+            // 相对可执行文件目录
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    cands.push(dir.join("python"));
+                    cands.push(dir.join("src-tauri/python"));
+                    cands.push(dir.join("../src-tauri/python"));
+                    cands.push(dir.join("../../src-tauri/python"));
+                }
+            }
+            cands
+        }
+
+        // 开发环境：每次启动都覆盖拷贝，确保新增/更新的脚本可用
         #[cfg(debug_assertions)]
         {
-            let src_python_dir = PathBuf::from("src-tauri/python");
-            if src_python_dir.exists() {
-                self.copy_dir_all(&src_python_dir, &python_files_dir)
-                    .map_err(|e| format!("Failed to copy python files: {}", e))?;
-                // 调试：输出目录内容，确认脚本同步
-                if let Ok(read_dir) = fs::read_dir(&python_files_dir) {
-                    let mut names: Vec<String> = Vec::new();
-                    for entry in read_dir.flatten() {
-                        names.push(entry.file_name().to_string_lossy().to_string());
+            for src_python_dir in candidate_src_dirs() {
+                if src_python_dir.exists() {
+                    self.copy_dir_all(&src_python_dir, &python_files_dir)
+                        .map_err(|e| format!("Failed to copy python files from {:?}: {}", src_python_dir, e))?;
+                    if let Ok(read_dir) = fs::read_dir(&python_files_dir) {
+                        let mut names: Vec<String> = Vec::new();
+                        for entry in read_dir.flatten() {
+                            names.push(entry.file_name().to_string_lossy().to_string());
+                        }
+                        info!("python_files content: {:?}", names);
                     }
-                    info!("python_files content: {:?}", names);
+                    return Ok(python_files_dir);
                 }
-                return Ok(python_files_dir);
             }
         }
         
@@ -688,18 +726,19 @@ impl PythonEnvManager {
             if python_files_dir.exists() {
                 return Ok(python_files_dir);
             }
-            let src_python_dir = PathBuf::from("src-tauri/python");
-            if src_python_dir.exists() {
-                self.copy_dir_all(&src_python_dir, &python_files_dir)
-                    .map_err(|e| format!("Failed to copy python files: {}", e))?;
-                if let Ok(read_dir) = fs::read_dir(&python_files_dir) {
-                    let mut names: Vec<String> = Vec::new();
-                    for entry in read_dir.flatten() {
-                        names.push(entry.file_name().to_string_lossy().to_string());
+            for src_python_dir in candidate_src_dirs() {
+                if src_python_dir.exists() {
+                    self.copy_dir_all(&src_python_dir, &python_files_dir)
+                        .map_err(|e| format!("Failed to copy python files from {:?}: {}", src_python_dir, e))?;
+                    if let Ok(read_dir) = fs::read_dir(&python_files_dir) {
+                        let mut names: Vec<String> = Vec::new();
+                        for entry in read_dir.flatten() {
+                            names.push(entry.file_name().to_string_lossy().to_string());
+                        }
+                        info!("python_files content: {:?}", names);
                     }
-                    info!("python_files content: {:?}", names);
+                    return Ok(python_files_dir);
                 }
-                return Ok(python_files_dir);
             }
         }
         

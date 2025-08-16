@@ -15,7 +15,7 @@ pub fn apply_mosaic(rects: Vec<Rect>, scale_factor: f64) {
         })
         .collect();
     
-    debug!("[apply_mosaic] Applying {} mosaics with scale_factor: {}", mosaics.len(), scale_factor);
+    debug!("[apply_mosaic] Applying {:?} mosaics with scale_factor: {}", mosaics, scale_factor);
     
     // 获取overlay窗口并发送马赛克数据和scale_factor
     if let Some(window) = crate::overlay::OverlayState::get_window() {

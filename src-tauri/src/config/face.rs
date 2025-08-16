@@ -20,4 +20,7 @@ pub struct DetectionConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct RecognitionConfig {
     pub threshold: f32,
+    pub provider: Option<String>,
+    pub outlier_threshold: Option<f32>,
+    pub outlier_iter: Option<i32>,
 }

@@ -6,7 +6,7 @@ use log::{error, debug};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use std::sync::Mutex;
 
-use crate::{ai::face_recognition, api::emitter, config, monitor::MonitorInfo, overlay};
+use crate::{ai::{faces}, api::emitter, config, monitor::MonitorInfo, overlay};
 
 static THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
@@ -64,7 +64,7 @@ fn cal() {
         }
     };
 
-    match face_recognition::detect_targets_or_all_faces(&image) {
+    match faces::detect_targets_or_all_faces(&image) {
         Ok(rects) => {
             if rects.is_empty() {
                 debug!("[cal] no faces detected");

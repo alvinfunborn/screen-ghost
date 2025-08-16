@@ -9,7 +9,7 @@ mod app_builder;
 mod app_state;
 pub use app_state::AppState;
 
-use crate::{utils::logger, ai::{face_detect, face_recognition}};
+use crate::utils::logger;
 use crate::config;
 
 const LOG_LEVEL: &str = "debug";
@@ -71,24 +71,27 @@ pub fn run() {
         autostart::set_auto_start(&app_handle).expect("Failed to setup auto start");
         info!("[✓] auto start setup");
 
-        // Initialize Python environment for face detection
-        if let Err(e) = face_detect::initialize_python_environment_with_app_handle(&app_handle) {
-            error!("[✗] Failed to initialize Python environment: {}", e);
-        } else {
-            info!("[✓] Python environment initialized for face detection");
-        }
+		// Initialize Python environment (run in background to avoid blocking UI)
+		let app_handle_clone = app_handle.clone();
+		tauri::async_runtime::spawn_blocking(move || {
+			match crate::ai::python_env::initialize_python_environment_with_app_handle(&app_handle_clone) {
+				Ok(()) => info!("[✓] Python environment initialized"),
+				Err(e) => {
+					error!("[✗] Failed to initialize Python environment: {}", e);
+					return;
+				}
+			}
 
-        // Initialize face recognition and preload targets from exe_dir/faces
-        if let Err(e) = face_recognition::initialize_face_recognition() {
-            error!("[✗] init face recognition failed: {}", e);
-        } else {
-            info!("[✓] face recognition model initialized");
-            if let Err(e) = face_recognition::preload_targets_from_faces_dir(&app_handle) {
-                error!("[✗] preload targets failed: {}", e);
-            } else {
-                info!("[✓] preload targets done");
-            }
-        }
+			// 初始化识别模型并预加载 faces/ 目录的人脸目标向量
+			match crate::ai::faces::initialize_face_recognition() {
+				Ok(()) => info!("[✓] face recognition model initialized"),
+				Err(e) => error!("[✗] face recognition model init failed: {}", e),
+			}
+			match crate::ai::faces::preload_targets_from_faces_dir(&app_handle_clone) {
+				Ok(()) => info!("[✓] preloaded target face embeddings from faces/"),
+				Err(e) => error!("[✗] preload target embeddings failed: {}", e),
+			}
+		});
 
         info!("=== application initialized ===");
         Ok(())
