@@ -8,8 +8,8 @@ use_gray = true
 image_scale = 0.8
 
 [face.recognition]
-# 可选cpu, cuda, dml
-provider = "cpu"
+# auto, cpu, cuda, dml
+provider = "auto"
 threshold = 0.55
 outlier_threshold = 0.3
 outlier_iter = 2
@@ -33,4 +33,4 @@ mosaic_style = """
 """
 
 [system]
-log_level = "info"
+log_level = "debug"

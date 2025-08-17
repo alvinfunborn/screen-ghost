@@ -20,6 +20,12 @@ interface Rect {
   height: number;
 }
 
+interface ImagePayload {
+  width: number;
+  height: number;
+  data: number[]; // BGRA
+}
+
 // 后端直接 emit Vec<Rect>，前端按数组解析
 // type FrameInfo = Record<string, Rect[]>;
 
@@ -29,6 +35,7 @@ function App() {
   const [faceRects, setFaceRects] = useState<Rect[]>([]);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({ width: 800, height: 400 });
+  const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Load monitors on component mount
   useEffect(() => {
@@ -47,6 +54,46 @@ function App() {
     });
     return () => {
       unlisten.then(fn => fn()).catch(err => console.error("Failed to cleanup frame_info listener", err));
+    };
+  }, [selectedMonitor]);
+
+  // Listen for image events and draw into canvas
+  useEffect(() => {
+    if (!selectedMonitor) return;
+    console.log("Setting up image listener for monitor:", selectedMonitor.id);
+    const draw = (img: ImagePayload) => {
+      const canvas = imageCanvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const { width, height, data } = img;
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      const src = data as number[];
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      // Convert BGRA -> RGBA
+      for (let i = 0, j = 0; i < src.length; i += 4, j += 4) {
+        const b = src[i];
+        const g = src[i + 1];
+        const r = src[i + 2];
+        const a = src[i + 3];
+        rgba[j] = r;
+        rgba[j + 1] = g;
+        rgba[j + 2] = b;
+        rgba[j + 3] = a;
+      }
+      const imageData = new ImageData(rgba, width, height);
+      ctx.putImageData(imageData, 0, 0);
+    };
+
+    const unlistenPromise = listen<ImagePayload>("image", (event) => {
+      const payload = event.payload as unknown as ImagePayload;
+      draw(payload);
+    });
+    return () => {
+      unlistenPromise.then(fn => fn()).catch(err => console.error("Failed to cleanup image listener", err));
     };
   }, [selectedMonitor]);
 
@@ -132,59 +179,78 @@ function App() {
   return (
     <div className="app">
       <PythonInstallationProgress />
-      <header className="app-header">
-        <h1>Screen Ghost - Monitor Demo</h1>
-      </header>
 
       <main className="app-main">
         <section className="monitor-section">
-          <h2>显示器布局</h2>
           <div className="display-viewport" ref={viewportRef}>
-            <div className="display-canvas" style={{ width: `${viewportSize.width}px`, height: `${viewportSize.height}px` }}>
-              {monitors.map(m => {
-                const left = offsetX + (m.x - bounds.minX) * scale;
-                const top = offsetY + (m.y - bounds.minY) * scale;
-                const width = m.width * scale;
-                const height = m.height * scale;
-                const isSelected = selectedMonitor?.id === m.id;
-                return (
-                  <div
-                    key={m.id}
-                    className={`display-monitor ${isSelected ? 'selected' : ''}`}
-                    style={{ left, top, width, height }}
-                    onClick={() => handleMonitorClick(m)}
-                    title={`位置(${m.x}, ${m.y}) 尺寸 ${m.width}×${m.height} 缩放 ${m.scale_factor}`}
-                  >
-                    <div className="display-label">{m.id + 1}</div>
-                  </div>
-                );
-              })}
+          <div className="display-canvas" style={{ width: `${viewportSize.width}px`, height: `${viewportSize.height}px` }}>
+            {monitors.map(m => {
+              const left = offsetX + (m.x - bounds.minX) * scale;
+              const top = offsetY + (m.y - bounds.minY) * scale;
+              const width = m.width * scale;
+              const height = m.height * scale;
+              const isSelected = selectedMonitor?.id === m.id;
+              return (
+                <div
+                  key={m.id}
+                  className={`display-monitor ${isSelected ? 'selected' : ''}`}
+                  style={{ left, top, width, height }}
+                  onClick={() => handleMonitorClick(m)}
+                  title={`位置(${m.x}, ${m.y}) 尺寸 ${m.width}×${m.height} 缩放 ${m.scale_factor}`}
+                >
+                  <div className="display-label">{m.id + 1}</div>
+                </div>
+              );
+            })}
 
-              {/* Face rectangles overlay for selected monitor */}
-              {selectedMonitor && faceRects.map((r, idx) => {
-                const left = offsetX + (selectedMonitor.x - bounds.minX + r.x) * scale;
-                const top = offsetY + (selectedMonitor.y - bounds.minY + r.y) * scale;
-                const width = r.width * scale;
-                const height = r.height * scale;
+            {/* Live screenshot canvas for selected monitor */}
+            {selectedMonitor && (
+              (() => {
+                const left = offsetX + (selectedMonitor.x - bounds.minX) * scale;
+                const top = offsetY + (selectedMonitor.y - bounds.minY) * scale;
+                const width = selectedMonitor.width * scale;
+                const height = selectedMonitor.height * scale;
                 return (
-                  <div
-                    key={`face-${idx}`}
+                  <canvas
+                    ref={imageCanvasRef}
                     style={{
                       position: 'absolute',
                       left,
                       top,
                       width,
                       height,
-                      border: '2px solid #ff5252',
-                      boxSizing: 'border-box',
                       pointerEvents: 'none',
                     }}
-                    title={`face ${idx+1}: (${r.x}, ${r.y}, ${r.width}x${r.height})`}
                   />
                 );
-              })}
-            </div>
+              })()
+            )}
+
+            {/* Face rectangles overlay for selected monitor */}
+            {selectedMonitor && faceRects.map((r, idx) => {
+              const left = offsetX + (selectedMonitor.x - bounds.minX + r.x) * scale;
+              const top = offsetY + (selectedMonitor.y - bounds.minY + r.y) * scale;
+              const width = r.width * scale;
+              const height = r.height * scale;
+              return (
+                <div
+                  key={`face-${idx}`}
+                  style={{
+                    position: 'absolute',
+                    left,
+                    top,
+                    width,
+                    height,
+                    border: '2px solid #ff5252',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'none',
+                  }}
+                  title={`face ${idx+1}: (${r.x}, ${r.y}, ${r.width}x${r.height})`}
+                />
+              );
+            })}
           </div>
+        </div>
         </section>
       </main>
     </div>

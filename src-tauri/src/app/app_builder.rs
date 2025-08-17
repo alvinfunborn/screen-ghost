@@ -24,9 +24,14 @@ pub fn create_app_builder() -> tauri::Builder<tauri::Wry> {
             command::get_mosaic_style,
         ])
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
-                api.prevent_close();
+            if let WindowEvent::CloseRequested { .. } = event {
+                // 仅当主窗口关闭时退出整个应用；其他窗口（如 overlay）允许正常关闭
+                if window.label() == "main" {
+                    let _ = std::panic::catch_unwind(|| {
+                        crate::system::monitoring::stop_monitoring();
+                    });
+                    let _ = window.app_handle().exit(0);
+                }
             }
         })
 }

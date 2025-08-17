@@ -14,8 +14,8 @@
         "fullscreen": false,
         "resizable": true,
         "title": "screen-ghost-rust",
-        "width": 800,
-        "height": 600
+        "width": 700,
+        "height": 300
       }
     ],
     "security": {

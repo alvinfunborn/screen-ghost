@@ -51,22 +51,9 @@
             z-index: 9998;
         }
         
-        .debug-info {
-            position: fixed;
-            top: 40px;
-            left: 10px;
-            color: white;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 5px;
-            font-size: 10px;
-            z-index: 10000;
-            max-width: 300px;
-        }
     </style>
 </head>
 <body>
-    <div id="test">Overlay Window Test</div>
-    <div id="debug-info" class="debug-info">Debug Info</div>
     <div id="mosaic-container"></div>
     
     <script type="module">
@@ -78,29 +65,20 @@
         const currentWindow = getCurrentWebview();
         
         console.log("[Overlay] Simple overlay loaded successfully");
-        document.getElementById('test').innerHTML = 'Overlay loaded at: ' + new Date().toLocaleTimeString();
         
         // 马赛克管理
         let mosaics = [];
         const mosaicContainer = document.getElementById('mosaic-container');
-        const debugInfo = document.getElementById('debug-info');
         // 全局样式文本，由后端在窗口创建后一次性下发
         let globalMosaicStyle = '';
         
         // 动态DPI缩放因子
         let scaleFactor = 1.0; // 默认值
         
-        // 更新调试信息
-        function updateDebugInfo(message) {
-            debugInfo.innerHTML = message;
-            console.log('[Debug]', message);
-        }
-        
         // 清除所有马赛克
         function clearMosaics() {
             mosaicContainer.innerHTML = '';
             mosaics = [];
-            updateDebugInfo('Cleared all mosaics');
         }
         
         // 显示所有马赛克
@@ -108,7 +86,6 @@
             mosaics.forEach(mosaic => {
                 mosaic.style.display = 'block';
             });
-            updateDebugInfo(`Showing ${mosaics.length} mosaics`);
         }
         
         // 隐藏所有马赛克
@@ -116,7 +93,6 @@
             mosaics.forEach(mosaic => {
                 mosaic.style.display = 'none';
             });
-            updateDebugInfo(`Hiding ${mosaics.length} mosaics`);
         }
         
         // 应用马赛克
@@ -124,7 +100,6 @@
             clearMosaics();
             
             if (!payload || !payload.mosaics || !Array.isArray(payload.mosaics)) {
-                updateDebugInfo('Error: invalid payload format');
                 return;
             }
             
@@ -133,6 +108,8 @@
                 scaleFactor = payload.scale_factor;
                 console.log(`[Overlay] Updated scale_factor to: ${scaleFactor}`);
             }
+
+            console.log(`[Overlay] payload: ${JSON.stringify(payload)}`);
             
             const rects = payload.mosaics;
             
@@ -162,19 +139,16 @@
                 console.log(`[Overlay] Created mosaic ${index}:`, rect, `-> logical: ${logicalX.toFixed(1)},${logicalY.toFixed(1)} ${logicalWidth.toFixed(1)}x${logicalHeight.toFixed(1)}`);
             });
             
-            updateDebugInfo(`Applied ${rects.length} mosaics (scale: ${scaleFactor})`);
             console.log(`[Overlay] Applied ${rects.length} mosaics with scale_factor: ${scaleFactor}`);
         }
         
         // 主初始化函数
         async function initialize() {
             try {
-                updateDebugInfo('Initializing...');
                 
                 // 设置 apply-mosaic 事件监听
                 const unlistenApply = await currentWindow.listen('apply-mosaic', (event) => {
                     console.log('[Overlay] Received apply-mosaic event:', event.payload);
-                    updateDebugInfo(`Received apply-mosaic: ${event.payload?.length || 0} items`);
                     applyMosaics(event.payload);
                 });
                 console.log('[Overlay] apply-mosaic listener set');
@@ -197,7 +171,7 @@
                             tag.id = styleTagId;
                             tag.textContent = `.mosaic { ${cssText} }`;
                             document.head.appendChild(tag);
-                            console.log('[Overlay] Injected global mosaic CSS into <style>#mosaic-style');
+                            console.log('[Overlay] Injected global mosaic CSS into <style>#mosaic-style: ', cssText);
                         } else {
                             console.log('[Overlay] No mosaic style returned, keep transparent default');
                         }
@@ -210,7 +184,6 @@
                 // 设置 show-mosaic 事件监听
                 const unlistenShow = await currentWindow.listen('show-mosaic', (event) => {
                     console.log('[Overlay] Received show-mosaic event');
-                    updateDebugInfo('Received show-mosaic event');
                     showMosaics();
                 });
                 console.log('[Overlay] show-mosaic listener set');
@@ -218,7 +191,6 @@
                 // 设置 hide-mosaic 事件监听
                 const unlistenHide = await currentWindow.listen('hide-mosaic', (event) => {
                     console.log('[Overlay] Received hide-mosaic event');
-                    updateDebugInfo('Received hide-mosaic event');
                     hideMosaics();
                 });
                 console.log('[Overlay] hide-mosaic listener set');
@@ -235,19 +207,15 @@
                     }
                 });
                 
-                updateDebugInfo('Event listeners setup completed');
                 console.log('[Overlay] Event listeners setup completed');
             } catch (error) {
-                updateDebugInfo(`Error: ${error.message}`);
                 console.error('[Overlay] Failed to setup event listeners:', error);
             }
         }
         
         // 等待 DOM 加载完成后再初始化
         document.addEventListener('DOMContentLoaded', () => {
-            updateDebugInfo('DOM loaded, starting initialization...');
             initialize().catch(error => {
-                updateDebugInfo(`Initialize failed: ${error.message}`);
                 console.error('[Overlay] initialize failed:', error);
             });
         });
@@ -277,12 +245,10 @@
         
         // 错误处理
         window.addEventListener('error', (event) => {
-            updateDebugInfo(`Global error: ${event.error}`);
             console.error('[Overlay] caught global error:', event.error);
         });
         
         window.addEventListener('unhandledrejection', (event) => {
-            updateDebugInfo(`Unhandled rejection: ${event.reason}`);
             console.error('[Overlay] caught unhandled rejection:', event.reason);
         });
     </script>

@@ -12,15 +12,28 @@ _TARGETS = {}
 _RECOG_THRESHOLD = 0.35
 
 
-def init_model(provider: str = "cpu") -> bool:
+def init_model(provider: str = "auto") -> bool:
     global _APP
     if _APP is not None:
         return True
     try:
         from insightface.app import FaceAnalysis
+        # 根据可用性选择最优 provider
         providers = None
+        try:
+            import onnxruntime as ort
+            avail = set(ort.get_available_providers())
+        except Exception:
+            avail = set()
         pl = provider.lower()
-        if pl == 'cpu':
+        if pl == 'auto':
+            if 'CUDAExecutionProvider' in avail:
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            elif 'DmlExecutionProvider' in avail:
+                providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
+            else:
+                providers = ["CPUExecutionProvider"]
+        elif pl == 'cpu':
             providers = ["CPUExecutionProvider"]
         elif pl == 'cuda':
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -35,22 +48,38 @@ def init_model(provider: str = "cpu") -> bool:
         return True
     except Exception as e:
         print(f"init_model failed with provider {provider}: {e}")
-        # 兜底回退到 CPU
+        # 若 CUDA 失败且 DML 可用，则尝试 DML，再不行回退 CPU
+        try:
+            import onnxruntime as ort
+            avail = set(ort.get_available_providers())
+        except Exception:
+            avail = set()
+        # 优先 DML 回退
+        if 'DmlExecutionProvider' in avail:
+            try:
+                from insightface.app import FaceAnalysis
+                app = FaceAnalysis(name='buffalo_l', providers=["DmlExecutionProvider", "CPUExecutionProvider"])
+                app.prepare(ctx_id=0, det_size=(640, 640))
+                _APP = app
+                return True
+            except Exception as e2:
+                print(f"fallback DML init failed: {e2}")
+        # 最后 CPU
         try:
             from insightface.app import FaceAnalysis
             app = FaceAnalysis(name='buffalo_l', providers=["CPUExecutionProvider"])
             app.prepare(ctx_id=0, det_size=(640, 640))
             _APP = app
             return True
-        except Exception as e2:
-            print(f"fallback CPU init failed: {e2}")
+        except Exception as e3:
+            print(f"fallback CPU init failed: {e3}")
             _APP = None
             return False
 
 
 def _ensure_model() -> None:
     if _APP is None:
-        ok = init_model('cpu')
+        ok = init_model('auto')
         if not ok:
             raise RuntimeError('face recognition model not initialized')
 
@@ -143,7 +172,7 @@ def detect_targets_or_all_faces(
         return faces
 
     # 若识别不可用或初始化失败，返回检测结果
-    if not init_model('cpu'):
+    if not init_model('auto'):
         return faces
 
     # 计算与目标库的相似度，命中则只返回最佳目标

@@ -47,6 +47,9 @@ const PythonInstallationProgress: React.FC = () => {
           message: event.payload as string,
           type: 'success'
         });
+        setTimeout(() => {
+          setStatus(prev => ({ ...prev, isVisible: false }));
+        }, 3000);
       })
     );
 
@@ -82,7 +85,10 @@ const PythonInstallationProgress: React.FC = () => {
       listen<string>('toast', (event) => {
         const msg = event.payload;
         if (msg === 'close') {
-          setStatus(prev => ({ ...prev, isVisible: false }));
+          setStatus({ isVisible: true, message: '安装完成', type: 'success' });
+          setTimeout(() => {
+            setStatus(prev => ({ ...prev, isVisible: false }));
+          }, 3000);
           return;
         }
         setStatus({
@@ -102,48 +108,47 @@ const PythonInstallationProgress: React.FC = () => {
     return null;
   }
 
-  const getStatusColor = () => {
-    switch (status.type) {
-      case 'success':
-        return 'bg-green-500';
-      case 'error':
-        return 'bg-red-500';
-      case 'progress':
-        return 'bg-blue-500';
-      default:
-        return 'bg-gray-500';
-    }
-  };
-
-  const getStatusIcon = () => {
-    switch (status.type) {
-      case 'success':
-        return '✓';
-      case 'error':
-        return '✗';
-      case 'progress':
-        return '⟳';
-      default:
-        return 'ℹ';
-    }
-  };
+  const icon = status.type === 'success' ? '✓' : status.type === 'error' ? '✗' : status.type === 'progress' ? '⟳' : 'ℹ';
 
   return (
-    <div className="fixed top-4 right-4 z-50">
-      <div className={`${getStatusColor()} text-white px-4 py-3 rounded-lg shadow-lg max-w-md`}>
-        <div className="flex items-center space-x-3">
-          <div className="text-lg font-bold">{getStatusIcon()}</div>
-          <div className="flex-1">
-            <div className="text-sm font-medium">{status.message}</div>
-            {status.type === 'progress' && (
-              <div className="mt-2">
-                <div className="w-full bg-white bg-opacity-20 rounded-full h-2">
-                  <div className="bg-white h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
-                </div>
-              </div>
-            )}
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0 as unknown as number,
+        background: 'rgba(0,0,0,0.5)',
+        zIndex: 10000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        pointerEvents: 'auto'
+      }}
+    >
+      <div
+        style={{
+          background: '#111',
+          color: '#fff',
+          padding: '16px 20px',
+          borderRadius: 12,
+          width: 'min(92vw, 520px)',
+          boxShadow: '0 10px 24px rgba(0,0,0,0.4)'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>{icon}</div>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>
+            {status.type === 'progress' ? '正在安装依赖…' : status.type === 'success' ? '安装完成' : status.type === 'error' ? '安装失败' : '处理中'}
           </div>
         </div>
+        <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{status.message}</div>
+        {status.type === 'progress' && (
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div className="loading-spinner" />
+            <div>正在安装…</div>
+          </div>
+        )}
+        {(status.type === 'info' || status.type === 'error' || status.type === 'success') && (
+          <div style={{ marginTop: 12, opacity: 0.8, fontSize: 12 }}>请稍候…</div>
+        )}
       </div>
     </div>
   );

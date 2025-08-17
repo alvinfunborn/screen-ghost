@@ -66,6 +66,16 @@ impl PythonEnvManager {
             // 3. 检查系统Python是否满足要求
             if self.check_system_python_requirements(&python_path)? {
                 info!("System Python meets requirements, using system Python");
+                // 若配置为 auto 或未设置，则在系统 Python 中尝试选择最优 ORT 变体（CUDA→DML→CPU）
+                let provider_pref = crate::config::get_config()
+                    .and_then(|c| c.face)
+                    .and_then(|f| f.recognition.provider)
+                    .unwrap_or_else(|| "auto".to_string())
+                    .to_lowercase();
+                if provider_pref == "auto" {
+                    info!("Ensuring optimal onnxruntime provider in system Python (auto)");
+                    let _ = self.auto_install_onnxruntime_in_system_python(&python_path);
+                }
                 emitter::emit_toast("系统 Python 就绪，正在完成初始化…");
                 self.is_initialized = true;
                 emitter::emit_toast_close();
@@ -132,6 +142,86 @@ impl PythonEnvManager {
         emitter::emit_toast("Python 环境初始化完成");
         emitter::emit_toast_close();
         Ok(())
+    }
+
+    // 在虚拟环境内自动安装最优 ORT 变体（CUDA→DML→CPU）
+    fn auto_install_onnxruntime_in_venv(&self, venv_path: &Path) -> Result<(), String> {
+        let pip_path = self.get_pip_path(venv_path)?;
+        let python_path = self.get_python_executable_from_venv(venv_path)?;
+
+        // 尝试 CUDA 版
+        let _ = Command::new(&pip_path).arg("install").arg("-U").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        if self.python_has_provider(&python_path, "CUDAExecutionProvider")?
+            && self.python_can_use_cuda(&python_path)? {
+            info!("Using CUDAExecutionProvider in venv");
+            return Ok(());
+        }
+
+        // 回退到 DML 版（Windows 下可用）
+        let _ = Command::new(&pip_path).arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = Command::new(&pip_path).arg("install").arg("-U").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        if self.python_has_provider(&python_path, "DmlExecutionProvider")? {
+            info!("Using DmlExecutionProvider in venv");
+            return Ok(());
+        }
+
+        // 最后回退到 CPU 版
+        let _ = Command::new(&pip_path).arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let out = Command::new(&pip_path).arg("install").arg("-U").arg("onnxruntime").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        match out { Ok(o) if o.status.success() => Ok(()), _ => Err("Failed to install onnxruntime (CPU)".to_string()) }
+    }
+
+    // 在系统 Python 内自动安装最优 ORT 变体（CUDA→DML→CPU）
+    fn auto_install_onnxruntime_in_system_python(&self, python_path: &Path) -> Result<(), String> {
+        // CUDA 版
+        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        if self.python_has_provider(python_path, "CUDAExecutionProvider")?
+            && self.python_can_use_cuda(python_path)? {
+            info!("Using CUDAExecutionProvider in system python");
+            return Ok(());
+        }
+        // DML 版
+        let _ = Command::new(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        if self.python_has_provider(python_path, "DmlExecutionProvider")? {
+            info!("Using DmlExecutionProvider in system python");
+            return Ok(());
+        }
+        // CPU 版
+        let _ = Command::new(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let out = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        match out { Ok(o) if o.status.success() => Ok(()), _ => Err("Failed to install onnxruntime (CPU) in system python".to_string()) }
+    }
+
+    // 小脚本检测 onnxruntime 是否具有某 provider
+    fn python_has_provider(&self, python_path: &Path, provider: &str) -> Result<bool, String> {
+        let code = format!("import onnxruntime as ort; print('{}' in ort.get_available_providers())", provider);
+        let out = Command::new(python_path)
+            .arg("-c").arg(code)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+            .map_err(|e| format!("execute python failed: {}", e))?;
+        if !out.status.success() { return Ok(false); }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(s == "True")
+    }
+
+    // 额外校验 CUDA 运行库（如 cublasLt64_12.dll）是否可加载
+    fn python_can_use_cuda(&self, python_path: &Path) -> Result<bool, String> {
+        #[cfg(target_os = "windows")]
+        {
+            let code = "import ctypes, sys;\nnames=['cublasLt64_12.dll','cudart64_12.dll'];\nok=True\n\nfor n in names:\n    try:\n        ctypes.WinDLL(n)\n    except Exception:\n        ok=False\nprint(ok)";
+            let out = Command::new(python_path)
+                .arg("-c").arg(code)
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+                .map_err(|e| format!("execute python failed: {}", e))?;
+            if !out.status.success() { return Ok(false); }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return Ok(s == "True");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(false)
+        }
     }
 
     fn detect_system_python(&self) -> Result<Option<PathBuf>, String> {
@@ -315,124 +405,108 @@ impl PythonEnvManager {
         let _ = Command::new(&pip_path)
             .arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-
-        // 识别依赖：根据 provider 选择 onnxruntime 变体
-        let provider = crate::config::get_config()
+        // 识别依赖安装策略：provider=auto 时启用自动探测（CUDA→DML→CPU），否则按固定 provider 安装
+        let provider_pref = crate::config::get_config()
             .and_then(|c| c.face)
             .and_then(|f| f.recognition.provider)
-            .unwrap_or_else(|| "cpu".to_string())
+            .unwrap_or_else(|| "auto".to_string())
             .to_lowercase();
-        let ort_pkg = match provider.as_str() {
-            "cuda" => "onnxruntime-gpu",
-            "dml" => "onnxruntime-directml",
-            _ => "onnxruntime",
-        };
-        let required_packages = [
-            "opencv-python",
-            "numpy",
-            ort_pkg,
-            "insightface",
-        ];
         let app_handle = self.app_handle.clone();
-        
+
         // 发送开始安装事件
         if let Some(ref handle) = app_handle {
             let _ = handle.emit("python-installation-started", "开始安装Python包...");
         }
-        
-        // 同步安装包
-        for (index, package) in required_packages.iter().enumerate() {
-            info!("Installing package: {}", package);
-            
-            // 发送进度更新
-            if let Some(ref handle) = app_handle {
-                let progress = (index as f64 / required_packages.len() as f64) * 100.0;
-                let _ = handle.emit("python-installation-progress", format!(
-                    "正在安装 {}... ({:.1}%)", package, progress
-                ));
+
+        if provider_pref == "auto" {
+            // 先安装基础依赖（numpy/opencv）
+            for (index, package) in ["numpy", "opencv-python"].iter().enumerate() {
+                info!("Installing package: {}", package);
+                if let Some(ref handle) = app_handle {
+                    let progress = (index as f64 / 4.0) * 100.0;
+                    let _ = handle.emit("python-installation-progress", format!(
+                        "正在安装 {}... ({:.1}%)", package, progress
+                    ));
+                }
+                let result = Command::new(&pip_path)
+                    .arg("install")
+                    .arg(package)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output();
+                match result {
+                    Ok(output) if output.status.success() => {
+                        if let Some(ref handle) = app_handle {
+                            let _ = handle.emit("python-installation-success", format!("成功安装 {}", package));
+                        }
+                    }
+                    _ => {
+                        let msg = format!("Failed to install {}", package);
+                        if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-error", &msg); }
+                        return Err(msg);
+                    }
+                }
             }
-            
-            // 尝试安装包
+
+            // 自动选择并安装最佳 ORT 变体
+            self.auto_install_onnxruntime_in_venv(venv_path)?;
+
+            // 安装 insightface（放在 ORT 选择之后，避免间接拉取冲突变体）
+            let package = "insightface";
+            info!("Installing package: {}", package);
+            if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-progress", "正在安装 insightface... (75.0%)"); }
             let result = Command::new(&pip_path)
                 .arg("install")
                 .arg(package)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output();
-            
             match result {
                 Ok(output) if output.status.success() => {
-                    info!("Successfully installed {}", package);
-                    
-                    // 发送成功消息
-                    if let Some(ref handle) = app_handle {
-                        let _ = handle.emit("python-installation-success", format!(
-                            "成功安装 {}", package
-                        ));
-                    }
+                    if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-success", "成功安装 insightface"); }
                 }
-                Ok(output) => {
-                    let error_msg = String::from_utf8_lossy(&output.stderr);
-                    warn!("Failed to install {}: {}", package, error_msg);
-                    
-                    // 尝试使用--user标志安装
-                    let result = Command::new(&pip_path)
-                        .arg("install")
-                        .arg("--user")
-                        .arg(package)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .output();
-                    
-                    match result {
-                        Ok(output) if output.status.success() => {
-                            info!("Successfully installed {} with --user flag", package);
-                            
-                            // 发送成功消息
-                            if let Some(ref handle) = app_handle {
-                                let _ = handle.emit("python-installation-success", format!(
-                                    "成功安装 {} (用户模式)", package
-                                ));
-                            }
-                        }
-                        Ok(output) => {
-                            let error_msg = String::from_utf8_lossy(&output.stderr);
-                            error!("Failed to install {}: {}", package, error_msg);
-                            
-                            // 发送错误消息
-                            if let Some(ref handle) = app_handle {
-                                let _ = handle.emit("python-installation-error", format!(
-                                    "安装失败 {}: {}", package, error_msg
-                                ));
-                            }
-                            
-                            return Err(format!("Failed to install {}: {}", package, error_msg));
-                        }
-                        Err(e) => {
-                            error!("Failed to execute pip command for {}: {}", package, e);
-                            
-                            // 发送错误消息
-                            if let Some(ref handle) = app_handle {
-                                let _ = handle.emit("python-installation-error", format!(
-                                    "执行pip命令失败 {}: {}", package, e
-                                ));
-                            }
-                            
-                            return Err(format!("Failed to execute pip command for {}: {}", package, e));
-                        }
-                    }
+                _ => {
+                    let msg = "Failed to install insightface".to_string();
+                    if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-error", &msg); }
+                    return Err(msg);
                 }
-                Err(e) => {
-                    error!("Failed to execute pip command for {}: {}", package, e);
-                    
-                    // 发送错误消息
-                    if let Some(ref handle) = app_handle {
-                        let _ = handle.emit("python-installation-error", format!(
-                            "执行pip命令失败 {}: {}", package, e
-                        ));
+            }
+        } else {
+            // 固定 provider：直接安装对应 ORT 变体
+            let ort_pkg = match provider_pref.as_str() {
+                "cuda" => "onnxruntime-gpu",
+                "dml" => "onnxruntime-directml",
+                _ => "onnxruntime",
+            };
+            let required_packages = [
+                "opencv-python",
+                "numpy",
+                ort_pkg,
+                "insightface",
+            ];
+            for (index, package) in required_packages.iter().enumerate() {
+                info!("Installing package: {}", package);
+                if let Some(ref handle) = app_handle {
+                    let progress = (index as f64 / required_packages.len() as f64) * 100.0;
+                    let _ = handle.emit("python-installation-progress", format!(
+                        "正在安装 {}... ({:.1}%)", package, progress
+                    ));
+                }
+                let result = Command::new(&pip_path)
+                    .arg("install")
+                    .arg(package)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output();
+                match result {
+                    Ok(output) if output.status.success() => {
+                        if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-success", format!("成功安装 {}", package)); }
                     }
-                    
-                    return Err(format!("Failed to execute pip command for {}: {}", package, e));
+                    _ => {
+                        let msg = format!("Failed to install {}", package);
+                        if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-error", &msg); }
+                        return Err(msg);
+                    }
                 }
             }
         }
@@ -502,123 +576,52 @@ impl PythonEnvManager {
         let _ = Command::new(python_path)
             .arg("-m").arg("pip").arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-
-        // 安装识别所需（根据 provider 选择 onnxruntime 变体）
-        let provider = crate::config::get_config()
+        // provider=auto 时：在系统 Python 中也尝试选择最优 ORT 变体；否则按固定 provider 安装
+        let provider_pref = crate::config::get_config()
             .and_then(|c| c.face)
             .and_then(|f| f.recognition.provider)
-            .unwrap_or_else(|| "cpu".to_string())
+            .unwrap_or_else(|| "auto".to_string())
             .to_lowercase();
-        let ort_pkg = match provider.as_str() {
-            "cuda" => "onnxruntime-gpu",
-            "dml" => "onnxruntime-directml",
-            _ => "onnxruntime",
-        };
-        let required_packages = ["opencv-python", "numpy", ort_pkg, "insightface"];
         let app_handle = self.app_handle.clone();
-        
-        // 发送开始安装事件
+
         if let Some(ref handle) = app_handle {
             let _ = handle.emit("python-installation-started", "在系统Python中安装包...");
         }
-        
-        for (index, package) in required_packages.iter().enumerate() {
+
+        // 先确保 numpy/opencv 存在
+        for (index, package) in ["numpy", "opencv-python"].iter().enumerate() {
             info!("Installing package in system Python: {}", package);
-            
-            // 发送进度更新
             if let Some(ref handle) = app_handle {
-                let progress = (index as f64 / required_packages.len() as f64) * 100.0;
+                let progress = (index as f64 / 4.0) * 100.0;
                 let _ = handle.emit("python-installation-progress", format!(
                     "正在安装 {}... ({:.1}%)", package, progress
                 ));
             }
-            
-            // 尝试安装包
             let result = Command::new(python_path)
-                .arg("-m")
-                .arg("pip")
-                .arg("install")
-                .arg(package)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-            
-            match result {
-                Ok(output) if output.status.success() => {
-                    info!("Successfully installed {} in system Python", package);
-                    
-                    // 发送成功消息
-                    if let Some(ref handle) = app_handle {
-                        let _ = handle.emit("python-installation-success", format!(
-                            "成功安装 {}", package
-                        ));
-                    }
-                }
-                Ok(output) => {
-                    let error_msg = String::from_utf8_lossy(&output.stderr);
-                    warn!("Failed to install {} in system Python: {}", package, error_msg);
-                    
-                    // 尝试使用--user标志安装
-                    let result = Command::new(python_path)
-                        .arg("-m")
-                        .arg("pip")
-                        .arg("install")
-                        .arg("--user")
-                        .arg(package)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .output();
-                    
-                    match result {
-                        Ok(output) if output.status.success() => {
-                            info!("Successfully installed {} with --user flag in system Python", package);
-                            
-                            // 发送成功消息
-                            if let Some(ref handle) = app_handle {
-                                let _ = handle.emit("python-installation-success", format!(
-                                    "成功安装 {} (用户模式)", package
-                                ));
-                            }
-                        }
-                        Ok(output) => {
-                            let error_msg = String::from_utf8_lossy(&output.stderr);
-                            error!("Failed to install {} in system Python: {}", package, error_msg);
-                            
-                            // 发送错误消息
-                            if let Some(ref handle) = app_handle {
-                                let _ = handle.emit("python-installation-error", format!(
-                                    "安装失败 {}: {}", package, error_msg
-                                ));
-                            }
-                            
-                            return Ok(false);
-                        }
-                        Err(e) => {
-                            error!("Failed to execute pip command for {}: {}", package, e);
-                            
-                            // 发送错误消息
-                            if let Some(ref handle) = app_handle {
-                                let _ = handle.emit("python-installation-error", format!(
-                                    "执行pip命令失败 {}: {}", package, e
-                                ));
-                            }
-                            
-                            return Ok(false);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to execute pip command for {}: {}", package, e);
-                    
-                    // 发送错误消息
-                    if let Some(ref handle) = app_handle {
-                        let _ = handle.emit("python-installation-error", format!(
-                            "执行pip命令失败 {}: {}", package, e
-                        ));
-                    }
-                    
-                    return Ok(false);
-                }
+                .arg("-m").arg("pip").arg("install").arg(package)
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+            if !matches!(result, Ok(ref o) if o.status.success()) {
+                return Ok(false);
+            }
+        }
+
+        if provider_pref == "auto" {
+            if let Err(e) = self.auto_install_onnxruntime_in_system_python(python_path) {
+                warn!("auto onnxruntime in system python failed: {}", e);
+                return Ok(false);
+            }
+            // 安装 insightface
+            let result = Command::new(python_path)
+                .arg("-m").arg("pip").arg("install").arg("insightface")
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+            if !matches!(result, Ok(ref o) if o.status.success()) { return Ok(false); }
+        } else {
+            let ort_pkg = match provider_pref.as_str() { "cuda" => "onnxruntime-gpu", "dml" => "onnxruntime-directml", _ => "onnxruntime" };
+            for package in [ort_pkg, "insightface"] {
+                let result = Command::new(python_path)
+                    .arg("-m").arg("pip").arg("install").arg(package)
+                    .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+                if !matches!(result, Ok(ref o) if o.status.success()) { return Ok(false); }
             }
         }
         

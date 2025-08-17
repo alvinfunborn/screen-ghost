@@ -1,4 +1,4 @@
-use crate::{monitor::{self, MonitorInfo}, system::monitoring};
+use crate::{monitor::{monitor, MonitorInfo}, system::monitoring};
 use crate::config;
 
 #[tauri::command]

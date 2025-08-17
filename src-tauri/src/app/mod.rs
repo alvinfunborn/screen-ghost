@@ -110,6 +110,8 @@ pub fn run() {
                 CoUninitialize();
                 info!("[✓] COM uninitialized");
             }
+            // 确保监控线程退出
+            crate::system::monitoring::stop_monitoring();
         }
     });
 }

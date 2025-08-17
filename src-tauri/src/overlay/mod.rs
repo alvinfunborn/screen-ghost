@@ -81,6 +81,10 @@ pub async fn create_overlay_window(
     
     let window = window.unwrap();
     info!("[create_overlay_window] Window created successfully");
+
+    if log::max_level() == log::LevelFilter::Debug {
+        let _ = window.open_devtools();
+    }
     
     OverlayState::set_window(window.clone());
     info!("[create_overlay_window] Window stored in OverlayState");
