@@ -1,6 +1,6 @@
 use crate::mosaic::Mosaic;
 use crate::utils::rect::Rect;
-use log::{debug};
+use log::{info};
 use std::sync::{OnceLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::Value;
@@ -91,7 +91,7 @@ pub fn apply_mosaic(rects: Vec<Rect>, mosaic_scale: f32, dpi_scale: f64) {
         })
         .collect();
     
-    debug!("[apply_mosaic] Applying {} mosaics (mosaic_scale={}, dpi_scale={})", mosaics.len(), mosaic_scale, dpi_scale);
+    info!("[apply_mosaic] Applying {} mosaics (mosaic_scale={}, dpi_scale={})", mosaics.len(), mosaic_scale, dpi_scale);
     
     // 生成 payload，并更新最新缓存（供前端轮询获取最新状态）
     let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;

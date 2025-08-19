@@ -1,92 +1,136 @@
-# Screen Ghost - Monitor Demo
+## Screen Ghost
 
-A Tauri + React application that demonstrates real-time monitor capture and display functionality.
+> Real-time face detection and mosaic overlay desktop eye protection tool
+> Built with Tauri + React + Rust, integrated with Python/OpenCV/InsightFace, supporting multi-monitor and high-frame low-latency rendering
 
-## Features
+---
 
-- **Monitor Detection**: Automatically detects and displays all available monitors
-- **Monitor Selection**: Click on any monitor to select it for capture
-- **Real-time Image Display**: Shows live screenshots from the selected monitor
-- **Modern UI**: Clean, responsive interface with dark mode support
+### Language / 语言
 
-## How to Use
+- [English](README.md) | [中文](README_zh.md)
 
-1. **Launch the Application**: Run `npm run tauri dev` to start the development server
-2. **View Available Monitors**: The app will display all detected monitors with their specifications
-3. **Select a Monitor**: Click on any monitor card to select it for capture
-4. **View Live Images**: Once selected, the app will start receiving and displaying live screenshots from the monitor
+---
 
-## Technical Details
+### Use Cases
 
-### Frontend (React + TypeScript)
-- **Monitor Display**: Grid layout showing all available monitors with position, size, and scale information
-- **Image Processing**: Converts BGRA image data from backend to RGBA for canvas display
-- **Event Listening**: Listens for `image` events from the Tauri backend
-- **Responsive Design**: Works on different screen sizes with mobile support
+- Automatically mask "target persons" when watching any video or image
+- Covers all scenarios including local players, browsers, image viewers, etc.
 
-### Backend (Rust + Tauri)
-- **Monitor Detection**: Uses Windows API to enumerate all available monitors
-- **Screen Capture**: Captures screenshots every 3 seconds using DirectX Desktop Duplication
-- **Event Emission**: Emits captured images to the frontend via Tauri events
-- **State Management**: Maintains selected monitor state across the application
+---
 
-## Development
+### Core Features
 
-### Prerequisites
-- Node.js 18+
-- Rust 1.70+
-- Windows 10/11 (for monitor capture functionality)
+- **High Frame Rate & Low Latency**:
+- **Two Working Modes**:
+  - No target library: Detect "all faces" and apply masks
+  - With target library: Execute InsightFace detection+recognition on the entire image with the same `image_scale`, returning only bounding boxes for matched "target persons"
+- **Automated Python Environment**:
+  - First launch automatically creates venv and silently installs dependencies (numpy/opencv/onnxruntime/insightface)
+- **Security**:
+  - Open source code, no network connections, no backdoors, no poison
 
-### Setup
+---
+
+### Screenshots/Examples
+
+- Overlay renders mosaics in a separate window without modifying the original desktop
+- Customizable `mosaic_style` (CSS string) for different mask styles
+
+![demo](./docs/demo.gif)
+
+---
+
+### Installation & Usage
+
+#### Method 1: Direct Download & Run (Recommended)
+
+1. Go to [Releases page](https://github.com/alvinfunborn/screen-ghost/releases) to download the release package, extract to any directory
+2. Ensure the directory structure is as follows:
+   ```
+   your-directory/
+   ├── screen-ghost.exe
+   ├── config.toml
+   └── faces/
+       ├── Zhang San/
+       │   ├── photo1.jpg
+       │   └── photo2.jpg
+       └── Li Si/
+           ├── photo1.jpg
+           └── photo2.jpg
+   ```
+3. Create subfolders under `faces/` directory (e.g., person names) and place target face photos
+4. Double-click `screen-ghost.exe` to run
+
+First launch will automatically:
+- Detect system Python; create venv and install dependencies if unavailable
+- Subsequent launches will first verify if venv dependencies are complete, skipping installation if complete
+
+> Environment: Windows 10/11 x64; GPU available will prioritize CUDA, then DirectML, otherwise CPU.
+
+#### Method 2: Source Code Compilation
+
 ```bash
-# Install dependencies
-npm install
+# Clone repository
+git clone https://github.com/alvinfunborn/screen-ghost.git
+cd screen-ghost
 
-# Start development server
+# Install frontend dependencies
+npm ci
+
+# Build Tauri backend
+cd src-tauri
+cargo build
+
+# Development mode launch
+cd ..
 npm run tauri dev
-
-# Build for production
-npm run tauri build
 ```
 
-### Project Structure
+---
+
+### Configuration (`src-tauri/config.toml`)
+
+```toml
+[face.detection]
+min_face_ratio = 0.05      # Minimum face detection ratio (short side percentage), falls back to *_face_size if not provided
+max_face_ratio = 0.9
+scale_factor = 1.2         # Haar upsampling step
+min_neighbors = 3
+confidence_threshold = 0.4 # Discard if below this confidence
+use_gray = true
+image_scale = 0.7          # Image scaling before detection
+
+[face.recognition]
+# auto | cpu | cuda | dml
+provider = "auto"          # Recognition model runtime environment, auto will select and install corresponding ORT variants by CUDA→DML→CPU priority
+threshold = 0.55           # Recognition hit threshold (cosine similarity)
+outlier_threshold = 0.3    # Outlier removal threshold (building mean features for each person)
+outlier_iter = 2
+
+[monitoring]
+interval = 8               # Main loop interval (ms)
+mosaic_scale = 2.0         # Mosaic rectangle geometric magnification (independent of DPI)
+capture_scale = 1.0        # Downsampling ratio after screenshot, before detection (speed up)
+mosaic_style = """
+{
+    position: absolute;
+    background-color: rgba(0,0,0,0.4);   /* Example: semi-transparent black mask */
+    image-rendering: pixelated;
+    border-radius: 4px;
+}
+"""
+
+[system]
+log_level = "debug"
 ```
-src/
-├── App.tsx          # Main React component
-├── App.css          # Styles for the demo interface
-└── main.tsx         # React entry point
 
-src-tauri/
-├── src/
-│   ├── api/
-│   │   ├── command.rs    # Tauri commands for frontend
-│   │   └── emitter.rs    # Event emission utilities
-│   ├── monitor/
-│   │   ├── mod.rs        # Monitor detection and management
-│   │   └── monitor.rs    # Screen capture implementation
-│   └── system/
-│       └── monitoring/   # Background monitoring system
-└── Cargo.toml
-```
+---
 
-## API Commands
+### Target Face Photo Library (`faces/<name>/xxx.jpg`)
 
-- `get_monitors()`: Returns list of all available monitors
-- `set_working_monitor(monitor)`: Sets the monitor to capture
-- `start_monitoring()`: Starts the background capture process
+- **Quantity**: Recommend 5-10 photos per person (≥3 usable, >20 usually diminishing returns)
+- **Quality**: Side length ≥ 160-200px, clear, unobstructed; diverse lighting but not over/under exposed
+- **Diversity**: Slight pose/expression/lighting variations; some glasses acceptable; avoid high repetition
+- **Organization**: One folder per person, don't mix others' photos; correct orientation if abnormal
 
-## Events
-
-- `image`: Emitted when a new screenshot is captured, contains image data in BGRA format
-
-## License
-
-MIT License
-
-
-### fixme
-1. [x] 偶发打开要重新安装环境
-1. [x] 点击显示器布局来停止
-1. [x] 偶发人脸模型初始化失败
-1. [x] 马赛克尺寸
-1. 人脸识别性能优化(目标跟踪)
+Application will preload this directory on startup, calculate "mean features" for each person, and remove outliers by threshold/iteration.

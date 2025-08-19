@@ -146,7 +146,9 @@ fn cal() {
             debug!("[cal] screen shot success, image size: {}x{},{}", image.width, image.height, image.data.len());
 
             // 在进行检测的同时，异步预取下一帧
-            spawn_prefetch();
+            if config::get_config().unwrap().monitoring.unwrap().screen_shot_while_detecting {
+                spawn_prefetch();
+            }
 
             // 若人脸模型未就绪，则跳过本轮检测，但保证输出两行日志
             if !crate::ai::faces::is_face_model_ready() {

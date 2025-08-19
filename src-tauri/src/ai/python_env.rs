@@ -12,6 +12,23 @@ use crate::api::emitter;
 
 static PYTHON_ENV_MANAGER: OnceCell<PythonEnvManager> = OnceCell::new();
 
+// 在 Windows 上隐藏子进程窗口，避免弹出大量 cmd 窗口
+#[cfg(target_os = "windows")]
+fn configure_cmd_hide_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000; // CREATE_NO_WINDOW
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_cmd_hide_window(_cmd: &mut Command) {}
+
+fn new_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut c = Command::new(program);
+    configure_cmd_hide_window(&mut c);
+    c
+}
+
 #[derive(Debug)]
 pub struct PythonEnvManager {
     python_path: Option<PathBuf>,
@@ -147,7 +164,7 @@ impl PythonEnvManager {
         self.ensure_pip_in_venv(venv_path)?;
 
         // 尝试 CUDA 版
-        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(&python_path, "CUDAExecutionProvider")? {
             if self.python_can_use_cuda(&python_path)? {
                 info!("Using CUDAExecutionProvider in venv");
@@ -158,23 +175,23 @@ impl PythonEnvManager {
         }
 
         // 回退到 DML 版（Windows 下可用）
-        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(&python_path, "DmlExecutionProvider")? {
             info!("Using DmlExecutionProvider in venv");
             return Ok(());
         }
 
         // 最后回退到 CPU 版
-        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let out = Command::new(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let out = new_cmd(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         match out { Ok(o) if o.status.success() => Ok(()), _ => Err("Failed to install onnxruntime (CPU)".to_string()) }
     }
 
     // 在系统 Python 内自动安装最优 ORT 变体（CUDA→DML→CPU）
     fn auto_install_onnxruntime_in_system_python(&self, python_path: &Path) -> Result<(), String> {
         // CUDA 版
-        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(python_path, "CUDAExecutionProvider")? {
             if self.python_can_use_cuda(python_path)? {
                 info!("Using CUDAExecutionProvider in system python");
@@ -184,22 +201,22 @@ impl PythonEnvManager {
             }
         }
         // DML 版
-        let _ = Command::new(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(python_path, "DmlExecutionProvider")? {
             info!("Using DmlExecutionProvider in system python");
             return Ok(());
         }
         // CPU 版
-        let _ = Command::new(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let out = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = new_cmd(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let out = new_cmd(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         match out { Ok(o) if o.status.success() => Ok(()), _ => Err("Failed to install onnxruntime (CPU) in system python".to_string()) }
     }
 
     // 小脚本检测 onnxruntime 是否具有某 provider
     fn python_has_provider(&self, python_path: &Path, provider: &str) -> Result<bool, String> {
         let code = format!("import onnxruntime as ort; print('{}' in ort.get_available_providers())", provider);
-        let out = Command::new(python_path)
+        let out = new_cmd(python_path)
             .arg("-c").arg(code)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
             .map_err(|e| format!("execute python failed: {}", e))?;
@@ -224,7 +241,7 @@ def ok(names):
     except Exception:
         return False
 print('True' if ok(names_12) or ok(names_11) else 'False')"#;
-            let out = Command::new(python_path)
+            let out = new_cmd(python_path)
                 .arg("-c").arg(code)
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
                 .map_err(|e| format!("execute python failed: {}", e))?;
@@ -242,7 +259,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
         let python_commands = ["python", "python3", "python3.11", "python3.10", "python3.9", "python3.8"];
         
         for cmd in &python_commands {
-            if let Ok(output) = Command::new(cmd)
+            if let Ok(output) = new_cmd(cmd)
                 .arg("--version")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -250,7 +267,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             {
                 if output.status.success() {
                     // 获取Python可执行文件的完整路径
-                    if let Ok(output) = Command::new(cmd)
+                    if let Ok(output) = new_cmd(cmd)
                         .arg("-c")
                         .arg("import sys; print(sys.executable)")
                         .stdout(Stdio::piped())
@@ -306,7 +323,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             info!("Downloading Python installer from: {}", url);
 
             // 使用 PowerShell 下载，避免引入额外依赖
-            let download = Command::new("powershell")
+            let download = new_cmd("powershell")
                 .arg("-NoProfile")
                 .arg("-ExecutionPolicy")
                 .arg("Bypass")
@@ -332,7 +349,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
 
         // 运行静默安装
         info!("Installing Python silently to {:?}", target_dir);
-        let status = Command::new(&installer_path)
+        let status = new_cmd(&installer_path)
             .arg("/quiet")
             .arg("InstallAllUsers=0")
             .arg("PrependPath=0")
@@ -360,7 +377,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
         let required_packages = ["cv2", "numpy", "onnxruntime", "insightface"];
         
         for package in &required_packages {
-            let result = Command::new(python_path)
+            let result = new_cmd(python_path)
                 .arg("-c")
                 .arg(&format!("import {}", package))
                 .stdout(Stdio::piped())
@@ -390,7 +407,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
         let python_path = self.python_path.as_ref()
             .ok_or("No Python executable found")?;
         
-        let result = Command::new(python_path)
+        let result = new_cmd(python_path)
             .arg("-m")
             .arg("venv")
             .arg(&venv_path)
@@ -418,8 +435,13 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
     fn install_required_packages(&self, venv_path: &Path) -> Result<(), String> {
         let python_path = self.get_python_executable_from_venv(venv_path)?;
         self.ensure_pip_in_venv(venv_path)?;
+        // 若 venv 依赖已齐全，则直接跳过安装
+        if self.verify_packages_installed(venv_path)? {
+            info!("Venv dependencies already satisfied. Skipping installation.");
+            return Ok(());
+        }
         // 先升级 pip/setuptools/wheel 提高兼容性
-        let _ = Command::new(&python_path)
+        let _ = new_cmd(&python_path)
             .arg("-m").arg("pip").arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         // 识别依赖安装策略：provider=auto 时启用自动探测（CUDA→DML→CPU），否则按固定 provider 安装
@@ -445,7 +467,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
                         "正在安装 {}... ({:.1}%)", package, progress
                     ));
                 }
-                let result = Command::new(&python_path)
+                let result = new_cmd(&python_path)
                     .arg("-m").arg("pip").arg("install").arg(package)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -471,7 +493,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             let package = "insightface";
             info!("Installing package: {}", package);
             if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-progress", "正在安装 insightface... (75.0%)"); }
-            let result = Command::new(&python_path)
+            let result = new_cmd(&python_path)
                 .arg("-m").arg("pip").arg("install").arg(package)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -507,7 +529,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
                         "正在安装 {}... ({:.1}%)", package, progress
                     ));
                 }
-                let result = Command::new(&python_path)
+                let result = new_cmd(&python_path)
                     .arg("-m").arg("pip").arg("install").arg(package)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -546,10 +568,10 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
 
     fn verify_packages_installed(&self, venv_path: &Path) -> Result<bool, String> {
         let python_path = self.get_python_executable_from_venv(venv_path)?;
-        let required_packages = ["cv2", "numpy"];
+        let required_packages = ["cv2", "numpy", "onnxruntime", "insightface"];
         
         for package in &required_packages {
-            let result = Command::new(&python_path)
+            let result = new_cmd(&python_path)
                 .arg("-c")
                 .arg(&format!("import {}", package))
                 .stdout(Stdio::piped())
@@ -587,7 +609,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
 
     fn install_packages_in_system_python(&self, python_path: &Path) -> Result<bool, String> {
         // 先升级 pip/setuptools/wheel
-        let _ = Command::new(python_path)
+        let _ = new_cmd(python_path)
             .arg("-m").arg("pip").arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         // provider=auto 时：在系统 Python 中也尝试选择最优 ORT 变体；否则按固定 provider 安装
@@ -611,7 +633,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
                     "正在安装 {}... ({:.1}%)", package, progress
                 ));
             }
-            let result = Command::new(python_path)
+            let result = new_cmd(python_path)
                 .arg("-m").arg("pip").arg("install").arg(package)
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
             if !matches!(result, Ok(ref o) if o.status.success()) {
@@ -625,14 +647,14 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
                 return Ok(false);
             }
             // 安装 insightface
-            let result = Command::new(python_path)
+            let result = new_cmd(python_path)
                 .arg("-m").arg("pip").arg("install").arg("insightface")
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
             if !matches!(result, Ok(ref o) if o.status.success()) { return Ok(false); }
         } else {
             let ort_pkg = match provider_pref.as_str() { "cuda" => "onnxruntime-gpu", "dml" => "onnxruntime-directml", _ => "onnxruntime" };
             for package in [ort_pkg, "insightface"] {
-                let result = Command::new(python_path)
+                let result = new_cmd(python_path)
                     .arg("-m").arg("pip").arg("install").arg(package)
                     .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
                 if !matches!(result, Ok(ref o) if o.status.success()) { return Ok(false); }
@@ -696,13 +718,13 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
     fn ensure_pip_in_venv(&self, venv_path: &Path) -> Result<(), String> {
         // 快速存在性检查：优先通过 python -m pip --version 判断
         let py = self.get_python_executable_from_venv(venv_path)?;
-        let has_pip = Command::new(&py)
+        let has_pip = new_cmd(&py)
             .arg("-m").arg("pip").arg("--version")
             .stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
         if has_pip || self.get_pip_path(venv_path).is_ok() { return Ok(()); }
 
         // 1) 尝试启用 ensurepip
-        let status = Command::new(&py)
+        let status = new_cmd(&py)
             .arg("-m").arg("ensurepip").arg("--upgrade")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
         if !matches!(status, Ok(s) if s.success()) {
@@ -711,7 +733,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             {
                 let url = "https://bootstrap.pypa.io/get-pip.py";
                 let tmp = std::env::temp_dir().join("get-pip.py");
-                let dl = Command::new("powershell")
+                let dl = new_cmd("powershell")
                     .arg("-NoProfile").arg("-ExecutionPolicy").arg("Bypass")
                     .arg("-Command")
                     .arg(format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{}' -OutFile '{}'", url, tmp.display()))
@@ -719,7 +741,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
                 if !matches!(dl, Ok(s) if s.success()) {
                     return Err("Failed to download get-pip.py".to_string());
                 }
-                let run = Command::new(&py)
+                let run = new_cmd(&py)
                     .arg(tmp)
                     .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
                 if !matches!(run, Ok(s) if s.success()) {
@@ -730,13 +752,13 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             {
                 let url = "https://bootstrap.pypa.io/get-pip.py";
                 let tmp = std::env::temp_dir().join("get-pip.py");
-                let dl = Command::new("curl")
+                let dl = new_cmd("curl")
                     .arg("-fsSL").arg(url).arg("-o").arg(&tmp)
                     .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
                 if !matches!(dl, Ok(s) if s.success()) {
                     return Err("Failed to download get-pip.py (curl)".to_string());
                 }
-                let run = Command::new(&py)
+                let run = new_cmd(&py)
                     .arg(tmp)
                     .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
                 if !matches!(run, Ok(s) if s.success()) {
@@ -746,7 +768,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
         }
 
         // 最终确认
-        let ok = Command::new(&py)
+        let ok = new_cmd(&py)
             .arg("-m").arg("pip").arg("--version")
             .stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
         if ok { Ok(()) } else { Err("PIP still unavailable after bootstrap".to_string()) }
@@ -784,7 +806,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             // 相对当前工作目录
             cands.push(PathBuf::from("python"));
             cands.push(PathBuf::from("src-tauri/python"));
-            cands.push(PathBuf::from("../src-tauri/python"));
+            cands.push(PathBuf::from("../../src-tauri/python"));
             cands.push(PathBuf::from("../../src-tauri/python"));
             // 相对可执行文件目录
             if let Ok(exe) = std::env::current_exe() {

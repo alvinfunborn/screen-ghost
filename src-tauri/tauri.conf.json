@@ -1,5 +1,5 @@
 {
-  "productName": "screen-ghost-rust",
+  "productName": "screen-ghost",
   "version": "0.1.0",
   "identifier": "screen-ghost",
   "build": {
@@ -13,7 +13,7 @@
       {
         "fullscreen": false,
         "resizable": true,
-        "title": "screen-ghost-rust",
+        "title": "screen-ghost",
         "width": 700,
         "height": 300
       }
@@ -24,7 +24,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": "app",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

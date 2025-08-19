@@ -15,8 +15,13 @@ outlier_threshold = 0.3
 outlier_iter = 2
 
 [monitoring]
-interval = 0
-mosaic_scale = 2.0
+# 检测间隔/ms
+interval = 8
+# 是否在检测过程中预取下一帧, 适用于截图慢的场景
+screen_shot_while_detecting = false
+# 马赛克基于人脸的缩放倍率
+mosaic_scale = 1.8
+# 截图下采样倍率，仅用于检测加速，遮罩坐标将自动还原到原分辨率
 capture_scale = 1.0
 mosaic_style = """
 {
@@ -34,4 +39,4 @@ mosaic_style = """
 """
 
 [system]
-log_level = "debug"
+log_level = "info"
