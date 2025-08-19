@@ -28,6 +28,8 @@
             background: transparent;
             background-color: transparent;
             opacity: 1;
+            will-change: transform, width, height;
+            contain: layout paint style;
         }
         
         #test {
@@ -51,34 +53,139 @@
             z-index: 9998;
         }
         
+        #mosaic-canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            z-index: 9998;
+        }
+        
     </style>
 </head>
 <body>
     <div id="mosaic-container"></div>
+    <canvas id="mosaic-canvas"></canvas>
     
     <script type="module">
         import { invoke } from "@tauri-apps/api/core"; // v2
         import { listen } from "@tauri-apps/api/event";
         import { getCurrentWebview } from "@tauri-apps/api/webview";
+
+        const VERBOSE_LOG = false; // 关闭详细日志，避免控制台 I/O 干扰渲染
+        // 统一为 overlay 控制台日志添加时间戳（HH:mm:ss.SSS）
+        const __overlay__origConsole = {
+            log: console.log.bind(console),
+            info: console.info.bind(console),
+            warn: console.warn.bind(console),
+            error: console.error.bind(console),
+            debug: console.debug.bind(console),
+        };
+        function __overlay__ts() {
+            const d = new Date();
+            const pad = (n, l = 2) => String(n).padStart(l, '0');
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+        }
+        ["log", "info", "warn", "error", "debug"].forEach((lvl) => {
+            console[lvl] = (...args) => __overlay__origConsole[lvl](`[${__overlay__ts()}]`, ...args);
+        });
+        const vlog = (...args) => { if (VERBOSE_LOG) console.log(...args); };
         
         // 使用导入的 API 直接获取当前窗口
         const currentWindow = getCurrentWebview();
+        const USE_PULL = false; // 默认使用推送 + rAF 应用；需要时可切为拉取模式
         
         console.log("[Overlay] Simple overlay loaded successfully");
         
-        // 马赛克管理
+        // 马赛克管理（DOM保留，但改用 Canvas 渲染）
         let mosaics = [];
         const mosaicContainer = document.getElementById('mosaic-container');
+        const mosaicCanvas = document.getElementById('mosaic-canvas');
+        const ctx = mosaicCanvas.getContext('2d');
+        let devicePixelRatioCached = 1;
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            devicePixelRatioCached = dpr;
+            const w = document.documentElement.clientWidth;
+            const h = document.documentElement.clientHeight;
+            mosaicCanvas.width = Math.floor(w * dpr);
+            mosaicCanvas.height = Math.floor(h * dpr);
+            mosaicCanvas.style.width = w + 'px';
+            mosaicCanvas.style.height = h + 'px';
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.imageSmoothingEnabled = __mosaicSmoothing;
+        }
+        window.addEventListener('resize', resizeCanvas);
         // 全局样式文本，由后端在窗口创建后一次性下发
         let globalMosaicStyle = '';
+        let __mosaicPattern = null;
+        let __mosaicSmoothing = false; // 默认 crisp-edges
+        let __mosaicMode = 'stretch'; // 默认使用拉伸，不平铺
+        let __mosaicFit = 'fill'; // 'fill' | 'contain' | 'cover'
+        let __bgSizePx = null; // { w, h } when background-size uses px
+        function extractUrlFromCss(cssText) {
+            try {
+                const m = cssText.match(/url\(("|'|)([^\)"']+)\1\)/i);
+                return m ? m[2] : null;
+            } catch { return null; }
+        }
+        function detectSmoothingFromCss(cssText) {
+            const lower = (cssText || '').toLowerCase();
+            if (lower.includes('image-rendering: crisp-edges') || lower.includes('image-rendering: pixelated')) return false;
+            return true;
+        }
+        function loadPatternFromStyle(cssText) {
+            const text = cssText || '';
+            const url = extractUrlFromCss(text);
+            __mosaicSmoothing = detectSmoothingFromCss(text);
+            ctx.imageSmoothingEnabled = __mosaicSmoothing;
+            // 强制使用拉伸模式并根据 background-size 调整适配策略
+            __mosaicMode = 'stretch';
+            __mosaicFit = 'fill';
+            __bgSizePx = null;
+            const sizeMatch = text.match(/background-size\s*:\s*([^;]+);?/i);
+            if (sizeMatch) {
+                const val = sizeMatch[1].trim();
+                if (/^100%\s+100%$/i.test(val)) {
+                    __mosaicMode = 'stretch';
+                    __mosaicFit = 'fill';
+                } else if (/^contain$/i.test(val)) {
+                    __mosaicMode = 'stretch';
+                    __mosaicFit = 'contain';
+                } else if (/^cover$/i.test(val)) {
+                    __mosaicMode = 'stretch';
+                    __mosaicFit = 'cover';
+                } else {
+                    const parts = val.split(/\s+/);
+                    const parsePx = (s) => { const m = s.match(/^(\d+(?:\.\d+)?)px$/i); return m ? parseFloat(m[1]) : null; };
+                    const w = parsePx(parts[0]);
+                    const h = parts[1] ? parsePx(parts[1]) : w;
+                    if (w && h) __bgSizePx = { w, h };
+                }
+            }
+            if (!url) { __mosaicPattern = null; window.__mosaicImage__ = null; return; }
+            const img = new Image();
+            img.onload = () => {
+                // 拉伸模式直接使用 image，不创建平铺 pattern
+                __mosaicPattern = null;
+                window.__mosaicImage__ = img;
+            };
+            img.onerror = () => { __mosaicPattern = null; window.__mosaicImage__ = null; };
+            img.src = url;
+        }
         
         // 动态DPI缩放因子
         let scaleFactor = 1.0; // 默认值
         
-        // 清除所有马赛克
+        // 清除所有马赛克（DOM与Canvas）
         function clearMosaics() {
             mosaicContainer.innerHTML = '';
             mosaics = [];
+            const w = mosaicCanvas.width / devicePixelRatioCached;
+            const h = mosaicCanvas.height / devicePixelRatioCached;
+            ctx.clearRect(0, 0, w, h);
         }
         
         // 显示所有马赛克
@@ -95,64 +202,158 @@
             });
         }
         
-        // 应用马赛克
-        function applyMosaics(payload) {
-            clearMosaics();
-            
+        // 应用马赛克（Canvas 渲染）
+        function applyMosaicsInternal(payload) {
             if (!payload || !payload.mosaics || !Array.isArray(payload.mosaics)) {
                 return;
             }
-            
+
             // 更新scale_factor
             if (payload.scale_factor) {
                 scaleFactor = payload.scale_factor;
-                console.log(`[Overlay] Updated scale_factor to: ${scaleFactor}`);
+                vlog(`[Overlay] Updated scale_factor to: ${scaleFactor}`);
             }
+            if (VERBOSE_LOG) console.log('[Overlay] payload seq=', payload && payload.seq);
 
-            console.log(`[Overlay] payload: ${JSON.stringify(payload)}`);
-            
             const rects = payload.mosaics;
-            
-            rects.forEach((rect, index) => {
-                const mosaic = document.createElement('div');
-                mosaic.className = 'mosaic';
-
-                // 样式已在初始化时写入到 <style>，无需逐元素设置
-                
-                // 将物理像素坐标转换为逻辑像素坐标
+            const w = mosaicCanvas.width / devicePixelRatioCached;
+            const h = mosaicCanvas.height / devicePixelRatioCached;
+            ctx.clearRect(0, 0, w, h);
+            for (let i = 0; i < rects.length; i++) {
+                const rect = rects[i];
                 const logicalX = rect.x / scaleFactor;
                 const logicalY = rect.y / scaleFactor;
                 const logicalWidth = rect.width / scaleFactor;
                 const logicalHeight = rect.height / scaleFactor;
-                
-                mosaic.style.left = logicalX + 'px';
-                mosaic.style.top = logicalY + 'px';
-                mosaic.style.width = logicalWidth + 'px';
-                mosaic.style.height = logicalHeight + 'px';
-                
-                // 添加调试信息到马赛克元素
-                mosaic.title = `Mosaic ${index}: ${logicalX.toFixed(1)},${logicalY.toFixed(1)} ${logicalWidth.toFixed(1)}x${logicalHeight.toFixed(1)} (physical: ${rect.x},${rect.y} ${rect.width}x${rect.height})`;
-                
-                mosaicContainer.appendChild(mosaic);
-                mosaics.push(mosaic);
-                
-                console.log(`[Overlay] Created mosaic ${index}:`, rect, `-> logical: ${logicalX.toFixed(1)},${logicalY.toFixed(1)} ${logicalWidth.toFixed(1)}x${logicalHeight.toFixed(1)}`);
-            });
-            
-            console.log(`[Overlay] Applied ${rects.length} mosaics with scale_factor: ${scaleFactor}`);
+                if (__mosaicMode === 'stretch' && window.__mosaicImage__) {
+                    const img = window.__mosaicImage__;
+                    const imgW = img.naturalWidth || img.width;
+                    const imgH = img.naturalHeight || img.height;
+                    let dw = logicalWidth, dh = logicalHeight, dx = logicalX, dy = logicalY;
+                    if (__mosaicFit === 'contain' || __mosaicFit === 'cover') {
+                        const sx = logicalWidth / imgW;
+                        const sy = logicalHeight / imgH;
+                        const s = (__mosaicFit === 'contain') ? Math.min(sx, sy) : Math.max(sx, sy);
+                        dw = imgW * s;
+                        dh = imgH * s;
+                        dx = logicalX + (logicalWidth - dw) / 2;
+                        dy = logicalY + (logicalHeight - dh) / 2;
+                        if (__mosaicFit === 'cover') {
+                            // 避免超出目标矩形，进行裁剪
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.rect(logicalX, logicalY, logicalWidth, logicalHeight);
+                            ctx.clip();
+                            ctx.drawImage(img, dx, dy, dw, dh);
+                            ctx.restore();
+                            continue;
+                        }
+                    }
+                    ctx.drawImage(img, dx, dy, dw, dh);
+                } else {
+                    ctx.save();
+                    ctx.translate(logicalX, logicalY);
+                    if (__mosaicPattern) {
+                        ctx.fillStyle = __mosaicPattern;
+                    } else {
+                        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+                    }
+                    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+                    ctx.restore();
+                }
+            }
+            vlog(`[Overlay] Canvas applied ${rects.length} mosaics (scale_factor=${scaleFactor})`);
         }
-        
+
+        // 合帧应用：仅保留最新一帧；消费端使用 rAF 渲染，自动与显示器刷新同步
+        let __latestPayload = null;
+        let __rafScheduled = false;
+        let __lastSeq = 0;
+        function applyMosaics(payload) {
+            __latestPayload = payload;
+            if (!__rafScheduled) {
+                __rafScheduled = true;
+                requestAnimationFrame(() => {
+                    __rafScheduled = false;
+                    if (__latestPayload) {
+                        const p = __latestPayload; __latestPayload = null;
+                        applyMosaicsInternal(p);
+                        // 真实端到端延迟（依赖本机同一时钟）：渲染时刻的 Date.now() - 服务端 UNIX ms
+                        if (p && (typeof p.ts === 'number' || typeof p.emit_ts === 'number')) {
+                            const nowMs = Date.now();
+                            const genDelay = typeof p.ts === 'number' ? (nowMs - p.ts) : null;
+                            const emitDelay = typeof p.emit_ts === 'number' ? (nowMs - p.emit_ts) : null;
+                            const gap = (__lastSeq > 0 && typeof p.seq === 'number') ? (p.seq - __lastSeq - 1) : 0;
+                            if (typeof p.seq === 'number') __lastSeq = p.seq;
+                            if (VERBOSE_LOG) console.log('[Overlay] delay(gen,emit)=',
+                                genDelay != null ? Math.max(0, Math.round(genDelay)) : null,
+                                emitDelay != null ? Math.max(0, Math.round(emitDelay)) : null,
+                                'ms, seq=', p.seq, 'gap=', gap);
+                        }
+                    }
+                });
+            }
+        }
+
+        // 监听后端推送（最新帧，不合并）——Pull 模式下禁用
+        if (!USE_PULL) {
+            listen('mosaic-update', (event) => {
+                const payload = event?.payload;
+                if (payload) {
+                    window.__LATEST_MOSAIC__ = payload;
+                    applyMosaics(payload);
+                }
+            });
+        }
+
+        // rAF 拉取最新帧（仅取最新，不排队）
+        let __pullInflight = false;
+        let __nextPullAt = 0; // 节流时间戳（ms）
+        let __pullBaseInterval = 16; // 最小间隔（ms）
+        let __pullBackoff = 80; // 无更新时退避增量（ms）
+        async function pullLatestOnce() {
+            const now = Date.now();
+            if (__pullInflight || now < __nextPullAt) return;
+            __pullInflight = true;
+            try {
+                const payload = await invoke('get_latest_mosaic');
+                if (payload && typeof payload === 'object') {
+                    const seq = payload.seq;
+                    if (typeof seq === 'number') {
+                        if (__lastSeq === 0 || seq !== __lastSeq) {
+                            window.__LATEST_MOSAIC__ = payload;
+                            applyMosaics(payload);
+                            __nextPullAt = Date.now() + __pullBaseInterval; // 有更新，立即恢复到基线间隔
+                        } else {
+                            __nextPullAt = Date.now() + __pullBackoff; // 无更新，退避一会儿
+                        }
+                    } else {
+                        window.__LATEST_MOSAIC__ = payload;
+                        applyMosaics(payload);
+                        __nextPullAt = Date.now() + __pullBaseInterval;
+                    }
+                }
+            } catch (e) {
+                // 静默失败，下一帧再试
+                __nextPullAt = Date.now() + 100; // 短暂退避
+            } finally {
+                __pullInflight = false;
+            }
+        }
+        function startPullLoop() {
+            const tick = () => {
+                if (USE_PULL) pullLatestOnce();
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        }
+
+        // 取消固定 30fps 定时器，由 rAF 驱动
+
         // 主初始化函数
         async function initialize() {
             try {
                 
-                // 设置 apply-mosaic 事件监听
-                const unlistenApply = await currentWindow.listen('apply-mosaic', (event) => {
-                    console.log('[Overlay] Received apply-mosaic event:', event.payload);
-                    applyMosaics(event.payload);
-                });
-                console.log('[Overlay] apply-mosaic listener set');
-
                 // 初始化时拉取一次样式
                 async function loadGlobalMosaicStyle() {
                     try {
@@ -172,6 +373,8 @@
                             tag.textContent = `.mosaic { ${cssText} }`;
                             document.head.appendChild(tag);
                             console.log('[Overlay] Injected global mosaic CSS into <style>#mosaic-style: ', cssText);
+                            // 依据样式加载平铺图案
+                            loadPatternFromStyle(cssText);
                         } else {
                             console.log('[Overlay] No mosaic style returned, keep transparent default');
                         }
@@ -180,6 +383,7 @@
                     }
                 }
                 await loadGlobalMosaicStyle();
+                resizeCanvas();
                 
                 // 设置 show-mosaic 事件监听
                 const unlistenShow = await currentWindow.listen('show-mosaic', (event) => {
@@ -195,17 +399,15 @@
                 });
                 console.log('[Overlay] hide-mosaic listener set');
                 
-                // 设置清理函数
-                window.addEventListener('unload', () => {
-                    try {
-                        unlistenApply();
-                        unlistenShow();
-                        unlistenHide();
-                        console.log('[Overlay] listeners cleaned');
-                    } catch (error) {
-                        console.error('[Overlay] failed to clean listeners:', error);
-                    }
-                });
+                if (USE_PULL) {
+                    console.log('[Overlay] start pull loop via rAF');
+                    startPullLoop();
+                } else {
+                    console.log('[Overlay] using push + rAF apply');
+                }
+                
+                // 设置清理函数（无需轮询标志）
+                window.addEventListener('unload', () => {});
                 
                 console.log('[Overlay] Event listeners setup completed');
             } catch (error) {
@@ -213,12 +415,15 @@
             }
         }
         
-        // 等待 DOM 加载完成后再初始化
-        document.addEventListener('DOMContentLoaded', () => {
-            initialize().catch(error => {
-                console.error('[Overlay] initialize failed:', error);
-            });
-        });
+        // 初始化：若 DOM 已就绪则立刻执行，否则等待 DOMContentLoaded
+        const boot = () => {
+            initialize().catch(error => console.error('[Overlay] initialize failed:', error));
+        };
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', boot, { once: true });
+        } else {
+            boot();
+        }
         
         // 阻止所有鼠标和键盘事件
         function preventAllEvents(event) {

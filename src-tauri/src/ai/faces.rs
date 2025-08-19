@@ -4,6 +4,18 @@ use crate::ai::python_env;
 use log::info;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static FACE_MODEL_READY: OnceLock<AtomicBool> = OnceLock::new();
+
+fn face_model_flag() -> &'static AtomicBool {
+    FACE_MODEL_READY.get_or_init(|| AtomicBool::new(false))
+}
+
+pub fn is_face_model_ready() -> bool {
+    face_model_flag().load(Ordering::SeqCst)
+}
 
 // 统一入口：若存在目标人脸库，则返回命中的最佳目标；否则返回所有检测人脸
 pub fn detect_targets_or_all_faces(image: &Image) -> Result<Vec<Rect>, String> {
@@ -26,6 +38,20 @@ if r'{0}' not in sys.path:
         let face_cfg = crate::config::get_config().and_then(|c| c.face).unwrap_or_default();
         let det = face_cfg.detection;
         let rec = face_cfg.recognition;
+        // 基于当前图像尺寸与可选比例，换算 min/max face size（像素）
+        let (min_size_px, max_size_px) = {
+            let short_edge = image.width.min(image.height).max(1);
+            let min_px = det
+                .min_face_ratio
+                .and_then(|r| if r > 0.0 { Some(((short_edge as f32) * r).round() as i32) } else { None })
+                .unwrap_or(det.min_face_size.unwrap_or(64));
+            let max_px = det
+                .max_face_ratio
+                .and_then(|r| if r > 0.0 { Some(((short_edge as f32) * r).round() as i32) } else { None })
+                .unwrap_or(det.max_face_size.unwrap_or(800));
+            (min_px, max_px)
+        };
+
         let res: Vec<(i32, i32, i32, i32)> = faces_mod
             .call_method1(
                 "detect_targets_or_all_faces",
@@ -35,8 +61,8 @@ if r'{0}' not in sys.path:
                     image.height,
                     det.use_gray,
                     det.image_scale,
-                    det.min_face_size,
-                    det.max_face_size,
+                    min_size_px,
+                    max_size_px,
                     det.scale_factor,
                     det.min_neighbors,
                     det.confidence_threshold,
@@ -100,6 +126,8 @@ except Exception:
             .extract()
             .map_err(|e| format!("Failed to extract init_model result: {}", e))?;
         if !ok { return Err("init_model returned false".to_string()); }
+        // 标记模型就绪
+        face_model_flag().store(true, Ordering::SeqCst);
         Ok(())
     })
 }

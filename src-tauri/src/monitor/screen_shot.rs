@@ -11,8 +11,9 @@ use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 use windows::core::Interface;
 use windows::Win32::Graphics::Dxgi::{IDXGIOutputDuplication, DXGI_OUTDUPL_FRAME_INFO};
 use windows::Win32::Graphics::Dxgi::{IDXGIFactory1, CreateDXGIFactory1, IDXGIAdapter1, IDXGIOutput, IDXGIOutput1};
+use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
+use windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAIT_TIMEOUT;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwareness, PROCESS_PER_MONITOR_DPI_AWARE};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
@@ -31,7 +32,7 @@ pub fn capture_monitor_image(monitor: &MonitorInfo) -> Result<Image, String> {
 // 全局 DirectX 资源管理器
 static DIRECTX_MANAGER: OnceLock<Arc<Mutex<DirectXResourceManager>>> = OnceLock::new();
 
-struct DirectXResourceManager {
+	struct DirectXResourceManager {
     device: Option<ID3D11Device>,
     context: Option<ID3D11DeviceContext>,
     staging_texture: Option<ID3D11Texture2D>,
@@ -39,6 +40,18 @@ struct DirectXResourceManager {
     is_initialized: bool,
     last_width: i32,
     last_height: i32,
+    // 为每个监视器缓存 duplication 以避免每帧重建
+    duplications: HashMap<usize, CachedDuplication>,
+    last_image_valid: bool,
+}
+
+#[derive(Clone)]
+struct CachedDuplication {
+    duplication: IDXGIOutputDuplication,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
 }
 
 impl DirectXResourceManager {
@@ -51,6 +64,8 @@ impl DirectXResourceManager {
             is_initialized: false,
             last_width: 0,
             last_height: 0,
+            duplications: HashMap::new(),
+            last_image_valid: false,
         }
     }
     
@@ -154,6 +169,113 @@ impl DirectXResourceManager {
     fn get_output_buffer(&mut self) -> &mut Vec<u8> {
         &mut self.output_buffer
     }
+
+    unsafe fn recreate_device_for_adapter(&mut self, adapter1: &IDXGIAdapter1) -> Result<(), String> {
+        let adapter = adapter1
+            .cast::<IDXGIAdapter>()
+            .map_err(|e| format!("IDXGIAdapter cast failed: {e}"))?;
+
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        let hr = D3D11CreateDevice(
+            Some(&adapter),
+            windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+            windows::Win32::Foundation::HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        );
+        if hr.is_err() || device.is_none() || context.is_none() {
+            return Err("Failed to create D3D11 device for adapter".to_string());
+        }
+
+        self.device = device;
+        self.context = context;
+        self.is_initialized = true;
+        // 失效旧资源与缓存
+        self.staging_texture = None;
+        self.last_width = 0;
+        self.last_height = 0;
+        self.duplications.clear();
+        Ok(())
+    }
+
+    fn ensure_output_duplication(
+        &mut self,
+        monitor_id: usize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<IDXGIOutputDuplication, String> {
+        // 命中缓存则直接返回
+        if let Some(cached) = self.duplications.get(&monitor_id) {
+            if cached.x == x && cached.y == y && cached.width == width && cached.height == height {
+                return Ok(cached.duplication.clone());
+            }
+        }
+
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1 failed: {e}"))?;
+            let mut sel_output: Option<IDXGIOutput> = None;
+            let mut sel_adapter: Option<IDXGIAdapter1> = None;
+            let mut i = 0;
+            'outer: while let Ok(a) = factory.EnumAdapters1(i) {
+                let mut j = 0;
+                while let Ok(o) = a.EnumOutputs(j) {
+                    let desc = o.GetDesc().unwrap();
+                    let ox = desc.DesktopCoordinates.left;
+                    let oy = desc.DesktopCoordinates.top;
+                    let ow = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left; // Windows 坐标右下为开区间
+                    let oh = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+
+                    let width_match = (width - ow).abs() <= 10;
+                    let height_match = (height - oh).abs() <= 10;
+
+                    if x == ox && y == oy && width_match && height_match {
+                        sel_output = Some(o);
+                        sel_adapter = Some(a.clone());
+                        break 'outer;
+                    }
+                    j += 1;
+                }
+                i += 1;
+            }
+
+            let output = sel_output.ok_or_else(|| "No matching adapter/output found".to_string())?;
+            let adapter1 = sel_adapter.ok_or_else(|| "No adapter for output".to_string())?;
+
+            // 先尝试用现有设备创建 duplication；若参数错误，再基于该适配器重建设备并重试一次
+            let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("Output1 cast failed: {e}"))?;
+            let mut ensure_device = |mgr: &mut DirectXResourceManager| -> Result<ID3D11Device, String> {
+                if let Some(d) = &mgr.device { return Ok(d.clone()); }
+                mgr.recreate_device_for_adapter(&adapter1)?;
+                Ok(mgr.device.as_ref().unwrap().clone())
+            };
+
+            let mut device = ensure_device(self)?;
+            let mut duplication = match output1.DuplicateOutput(&device) {
+                Ok(dup) => Ok(dup),
+                Err(e) => {
+                    let code = e.code();
+                    if code.0 as u32 == 0x80070057 { // E_INVALIDARG / 参数错误：设备与输出不匹配
+                        self.recreate_device_for_adapter(&adapter1)?;
+                        device = self.device.as_ref().unwrap().clone();
+                        output1.DuplicateOutput(&device)
+                    } else {
+                        Err(e)
+                    }
+                }
+            }.map_err(|e| format!("DuplicateOutput failed: {e}"))?;
+
+            let cached = CachedDuplication { duplication: duplication.clone(), x, y, width, height };
+            self.duplications.insert(monitor_id, cached);
+            Ok(duplication)
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -239,8 +361,8 @@ fn record_result(monitor_id: usize, method: CaptureMethod, success: bool) {
 
 impl MonitorInfo {
     pub fn screen_shot(&self) -> Result<Image, String> {
-        // 设置DPI感知
-        self.set_dpi_awareness();
+        let start = std::time::Instant::now();
+        // 移除逐帧 DPI 感知设置，避免反复 E_ACCESSDENIED
         
         // 首先尝试 DirectX 方法
         match self.screen_shot_directx() {
@@ -259,17 +381,14 @@ impl MonitorInfo {
         }
 
         // 如果 DirectX 失败或返回空白内容，使用 GDI 方法
-        self.screen_shot_gdi()
+        let result = self.screen_shot_gdi();
+        let elapsed = start.elapsed();
+        info!("[perf] screen_shot {} ms", elapsed.as_millis());
+        result
     }
 
-    fn set_dpi_awareness(&self) {
-        unsafe {
-            // 设置DPI感知为每显示器感知
-            if let Err(e) = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) {
-                debug!("[set_dpi_awareness] Failed to set DPI awareness: {}", e);
-            }
-        }
-    }
+    #[allow(dead_code)]
+    fn set_dpi_awareness(&self) { /* no-op: handled at process init or by manifest */ }
 
     fn has_valid_content(&self, image: &Image) -> bool {
         // 采样若干点判断是否为“近乎纯色”或“全零”帧
@@ -495,140 +614,100 @@ impl MonitorInfo {
             // 获取资源管理器实例
             let manager = DirectXResourceManager::get_instance();
             
-            // 先初始化并创建（或复用）资源，然后克隆所需句柄，避免借用冲突
-            let (device, context, staging_texture) = {
+            // 先确保资源管理器初始化（不提前克隆上下文，避免后续重建设备后变成悬空指针）
+            {
                 let mut mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
-                // 确保资源管理器已初始化
                 mgr.initialize()?;
-                // 确保 staging texture 已创建
-                mgr.ensure_staging_texture(self.width, self.height)?;
-                // 克隆 COM 句柄供后续使用
-                let device = mgr.get_device().cloned().ok_or("Device not available")?;
-                let context = mgr.get_context().cloned().ok_or("Context not available")?;
-                let staging_texture = mgr.get_staging_texture().cloned().ok_or("Staging texture not available")?;
-                (device, context, staging_texture)
+            }
+            
+            // 复用缓存的 duplication，避免每帧重建（此步骤可能重建设备以匹配输出适配器）
+            let duplication = {
+                let mut mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
+                mgr.ensure_output_duplication(self.id, self.x, self.y, self.width, self.height)?
             };
             
-            // 创建DXGI工厂
-            let factory: IDXGIFactory1 = match CreateDXGIFactory1() {
-                Ok(f) => f,
-                Err(e) => return Err(format!("CreateDXGIFactory1 failed: {e}")),
-            };
-            
-            // 枚举适配器和输出，找到目标显示器
-            let mut _adapter: Option<IDXGIAdapter1> = None;
-            let mut output: Option<IDXGIOutput> = None;
-            let mut i = 0;
-            let mut found = false;
-            
-            while let Ok(a) = factory.EnumAdapters1(i) {
-                let mut j = 0;
-                
-                while let Ok(o) = a.EnumOutputs(j) {
-                    let desc = o.GetDesc().unwrap();
-                    let ox = desc.DesktopCoordinates.left;
-                    let oy = desc.DesktopCoordinates.top;
-                    let ow = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left + 1;
-                    let oh = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
-                    
-                    // 使用更宽松的匹配条件，允许10像素的误差
-                    let width_match = (self.width - ow).abs() <= 10;
-                    let height_match = (self.height - oh).abs() <= 10;
-                    
-                    if self.x == ox && self.y == oy && width_match && height_match {
-                        debug!("[screen_shot_directx_optimized] Found matching output: Adapter={}, Output={}", i, j);
-                        _adapter = Some(a.clone());
-                        output = Some(o);
-                        found = true;
-                        break;
-                    }
-                    j += 1;
-                }
-                if found { break; }
-                i += 1;
-            }
-            
-            if !found {
-                return Err("No matching adapter/output found".to_string());
-            }
-            
-            // 适配器句柄此处不再需要显式使用
-            let output = match output { Some(o) => o, None => return Err("No output found".to_string()) };
-            
-            // 获取Output1和Duplication
-            let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("Output1 cast failed: {e}"))?;
-            
-            // 尝试多次获取duplication，有时第一次会失败
-            let mut duplication: Option<IDXGIOutputDuplication> = None;
-            let mut retry_count = 0;
-            const MAX_RETRIES: i32 = 5;
-            
-            while duplication.is_none() && retry_count < MAX_RETRIES {
-                // DuplicateOutput 需要 IUnknown；ID3D11Device 可直接作为 Param<IUnknown>
-                match output1.DuplicateOutput(&device) {
-                    Ok(dup) => {
-                        duplication = Some(dup);
-                        debug!("[screen_shot_directx_optimized] Output duplication created on attempt {}", retry_count + 1);
-                    }
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count >= MAX_RETRIES {
-                            return Err(format!("DuplicateOutput failed after {} attempts: {e}", MAX_RETRIES));
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(150));
-                    }
-                }
-            }
-            
-            let duplication = duplication.unwrap();
-            
-            // 获取下一帧
+            // 获取下一帧：自适应等待，若连续超时尝试复用上一帧
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
-            // 一些外接坞/多GPU链路下，第一帧常为空白；适当增加等待时间
-            let hr = duplication.AcquireNextFrame(250, &mut frame_info, &mut resource);
-            if hr.is_err() {
-                return Err("AcquireNextFrame failed".to_string());
+            let timeouts = [16u32, 33u32, 50u32];
+            let mut got = false;
+            for to in timeouts {
+                let hr = duplication.AcquireNextFrame(to, &mut frame_info, &mut resource);
+                match hr {
+                    Ok(_) => { got = true; break; }
+                    Err(e) => {
+                        let code = e.code();
+                        if code == DXGI_ERROR_WAIT_TIMEOUT { continue; }
+                        return Err(format!("AcquireNextFrame failed: 0x{:X}", code.0));
+                    }
+                }
             }
-            let resource = resource.unwrap();
+            if !got {
+                if let Ok(mgr) = manager.lock() {
+                    let need = (self.width as usize * self.height as usize * 4) as usize;
+                    if mgr.last_image_valid && mgr.output_buffer.len() >= need {
+                        let image_data = mgr.output_buffer[..need].to_vec();
+                        let elapsed = start_time.elapsed();
+                        debug!("[screen_shot_directx_optimized] Reuse last frame after timeouts in {:?}: {}x{}", elapsed, self.width, self.height);
+                        return Ok(Image { width: self.width, height: self.height, data: image_data });
+                    }
+                }
+                return Err("AcquireNextFrame timeout".to_string());
+            }
+            let resource = match resource { Some(r) => r, None => { return Err("AcquireNextFrame returned no resource".to_string()); } };
             
             // 检查是否有累积帧
             if frame_info.AccumulatedFrames == 0 {
                 debug!("[screen_shot_directx_optimized] No accumulated frames");
             }
             
-            // 拷贝到复用的 staging texture
+            // 按帧的实际尺寸创建/复用 staging texture
             let tex: ID3D11Texture2D = resource.cast().map_err(|e| format!("Resource cast failed: {e}"))?;
+            let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+            tex.GetDesc(&mut desc);
+            let frame_w = desc.Width as i32;
+            let frame_h = desc.Height as i32;
+            {
+                let mut mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
+                mgr.ensure_staging_texture(frame_w, frame_h)?;
+            }
+            let staging_texture = {
+                let mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
+                mgr.get_staging_texture().cloned().ok_or("Staging texture not available")?
+            };
+            
+            // 关键：在 duplication/纹理准备完成后，再获取“当前最新”的上下文，避免与重建后的设备不一致
+            let context = {
+                let mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
+                mgr.get_context().cloned().ok_or("Context not available")?
+            };
             context.CopyResource(&staging_texture, &tex);
             
             // 读取像素数据到复用的缓冲区
             let mut mapped = windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             context.Map(&staging_texture, 0, windows::Win32::Graphics::Direct3D11::D3D11_MAP_READ, 0, Some(&mut mapped))
-                .map_err(|e| format!("Map failed: {e}"))?;
+                .map_err(|e| { let _ = duplication.ReleaseFrame(); format!("Map failed: {e}") })?;
             
             let pitch = mapped.RowPitch as usize;
-            let width = self.width as usize;
-            let height = self.height as usize;
+            let width = frame_w as usize;
+            let height = frame_h as usize;
+            let copy_bytes_per_row = std::cmp::min(width * 4, pitch);
             
-            // 获取复用缓冲区并确保大小足够
             let image_data = {
                 let mut mgr = manager.lock().map_err(|e| format!("Failed to lock resource manager: {}", e))?;
                 let output_buffer = mgr.get_output_buffer();
-                if output_buffer.len() < width * height * 4 {
-                    output_buffer.resize(width * height * 4, 0);
+                let needed = width * height * 4;
+                if output_buffer.len() < needed { output_buffer.resize(needed, 0); }
+                for y in 0..height {
+                    let src = (mapped.pData as *const u8).wrapping_add(y * pitch);
+                    let start = y * width * 4;
+                    let end = start + width * 4;
+                    let dst_slice = &mut output_buffer[start..end];
+                    std::ptr::copy_nonoverlapping(src, dst_slice.as_mut_ptr(), copy_bytes_per_row);
                 }
-            // 逐行复制数据到复用缓冲区
-            // 逐行内存复制（仅在调用处使用 unsafe）
-            for y in 0..height {
-                let src = (mapped.pData as *const u8).wrapping_add(y * pitch);
-                // 目标切片范围已在上方 resize 保证
-                let start = y * width * 4;
-                let end = start + width * 4;
-                let dst_slice = &mut output_buffer[start..end];
-                std::ptr::copy_nonoverlapping(src, dst_slice.as_mut_ptr(), width * 4);
-            }
-                // 返回一个拷贝用于构造 Image，避免持有锁
-                output_buffer[..width * height * 4].to_vec()
+                let out = output_buffer[..needed].to_vec();
+                mgr.last_image_valid = true;
+                out
             };
             
             context.Unmap(&staging_texture, 0);
@@ -637,11 +716,7 @@ impl MonitorInfo {
             let elapsed = start_time.elapsed();
             debug!("[screen_shot_directx_optimized] Optimized DirectX screenshot completed in {:?}: {}x{}", elapsed, width, height);
             
-            Ok(Image {
-                width: width as i32,
-                height: height as i32,
-                data: image_data,
-            })
+            Ok(Image { width: width as i32, height: height as i32, data: image_data })
         }
     }
 
@@ -750,9 +825,12 @@ impl MonitorInfo {
             // 6. 获取下一帧
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
-            let hr = duplication.AcquireNextFrame(300, &mut frame_info, &mut resource);
+            // 将标准方法的等待也降低，减少卡顿
+            let hr = duplication.AcquireNextFrame(16, &mut frame_info, &mut resource);
             if hr.is_err() {
-                return Err("AcquireNextFrame failed".to_string());
+                let code = hr.unwrap_err().code();
+                if code == DXGI_ERROR_WAIT_TIMEOUT { return Err("AcquireNextFrame timeout".to_string()); }
+                return Err(format!("AcquireNextFrame failed: 0x{:X}", code.0));
             }
             let resource = resource.unwrap();
             

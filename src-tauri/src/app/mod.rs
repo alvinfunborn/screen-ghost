@@ -11,6 +11,7 @@ pub use app_state::AppState;
 
 use crate::utils::logger;
 use crate::config;
+use crate::api::emitter;
 
 const LOG_LEVEL: &str = "debug";
 
@@ -29,6 +30,11 @@ pub fn run() {
     // Initialize logger
     let log_level = cfg.system.as_ref().and_then(|s| s.log_level.clone()).unwrap_or_else(|| LOG_LEVEL.to_string());
     let _ = logger::init_logger(log_level);
+    // 尝试减少 WebView2 后台节流与遮挡检测带来的计时器阻塞
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-features=CalculateNativeWinOcclusion",
+    );
     
     // Initialize COM
     unsafe {
@@ -83,14 +89,19 @@ pub fn run() {
 			}
 
 			// 初始化识别模型并预加载 faces/ 目录的人脸目标向量
+			emitter::emit_toast("正在初始化人脸识别模型…");
 			match crate::ai::faces::initialize_face_recognition() {
 				Ok(()) => info!("[✓] face recognition model initialized"),
 				Err(e) => error!("[✗] face recognition model init failed: {}", e),
 			}
+			emitter::emit_toast("正在预加载人脸库与特征…");
 			match crate::ai::faces::preload_targets_from_faces_dir(&app_handle_clone) {
 				Ok(()) => info!("[✓] preloaded target face embeddings from faces/"),
 				Err(e) => error!("[✗] preload target embeddings failed: {}", e),
 			}
+			// 至此后端完全就绪，再发完成事件与关闭 toast，确保前端可操作
+			emitter::emit_toast("全部初始化完成，可开始使用");
+			emitter::emit_toast_close();
 		});
 
         info!("=== application initialized ===");

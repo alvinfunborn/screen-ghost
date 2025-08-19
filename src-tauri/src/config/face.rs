@@ -8,8 +8,11 @@ pub struct FaceConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct DetectionConfig {
-    pub min_face_size: i32,
-    pub max_face_size: i32,
+    pub min_face_size: Option<i32>,
+    pub max_face_size: Option<i32>,
+    // 可选：按短边比例指定人脸最小/最大尺寸（0.0~1.0）。若提供，则优先于 *_face_size。
+    pub min_face_ratio: Option<f32>,
+    pub max_face_ratio: Option<f32>,
     pub scale_factor: f64,
     pub min_neighbors: i32,
     pub confidence_threshold: f32,

@@ -11,7 +11,6 @@ _APP = None
 _TARGETS = {}
 _RECOG_THRESHOLD = 0.35
 
-
 def init_model(provider: str = "auto") -> bool:
     global _APP
     if _APP is not None:
@@ -147,11 +146,74 @@ def detect_targets_or_all_faces(
     recognition_threshold: float | None = None,
 ) -> List[Tuple[int,int,int,int]]:
     """
-    若识别模型可用：尝试根据整图识别返回最大目标的人脸框；
-    否则：返回所有检测到的人脸框。
+    行为统一：
+    - 若存在目标库(_TARGETS 非空)且识别模型可用：按与检测相同的 image_scale 缩放整图，使用 InsightFace 检测+嵌入，选出命中最佳目标并返回其框。
+    - 否则：按现有配置走 Haar 全人脸检测并返回所有人脸框。
     """
-    # 先做检测（使用内置可配置入口）
-    faces = detect_faces_with_config(
+    # 若存在目标，优先走“目标检测”路径
+    if _TARGETS:
+        try:
+            if not init_model('auto'):
+                # 模型不可用则退回普通检测
+                raise RuntimeError('model init failed')
+
+            # 解码 BGRA，并按 image_scale 进行统一缩放
+            arr = np.frombuffer(image_data, dtype=np.uint8).reshape(height, width, 4)
+            bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            scale = float(image_scale) if image_scale and image_scale > 0 else 1.0
+            if abs(scale - 1.0) > 1e-6:
+                sw = max(1, int(round(width * scale)))
+                sh = max(1, int(round(height * scale)))
+                bgr_scaled = cv2.resize(bgr, (sw, sh), interpolation=cv2.INTER_LINEAR)
+                inv = 1.0 / scale
+            else:
+                bgr_scaled = bgr
+                inv = 1.0
+
+            # 在缩放后的图上运行 InsightFace 检测+嵌入
+            faces_info = _APP.get(bgr_scaled)
+            if not faces_info:
+                return []
+
+            thr = float(recognition_threshold) if recognition_threshold is not None else float(_RECOG_THRESHOLD)
+
+            def cosine(a: np.ndarray, b: np.ndarray) -> float:
+                return float(np.dot(a, b))
+
+            best_bbox = None
+            best_score = -1.0
+            for f in faces_info:
+                emb = f.normed_embedding
+                if emb is None:
+                    continue
+                emb = np.asarray(emb, dtype=np.float32)
+                # 与目标库计算相似度（目标已归一化，InsightFace 输出通常已归一化）
+                for _person, target in _TARGETS.items():
+                    score = cosine(emb, target)
+                    if score > best_score:
+                        best_score = score
+                        best_bbox = f.bbox
+
+            if best_bbox is not None and best_score >= thr:
+                x0, y0, x1, y1 = map(float, best_bbox)
+                # 映射回原分辨率
+                x0 = int(round(x0 * inv)); y0 = int(round(y0 * inv))
+                x1 = int(round(x1 * inv)); y1 = int(round(y1 * inv))
+                x0 = max(0, min(x0, width - 1))
+                y0 = max(0, min(y0, height - 1))
+                x1 = max(x0 + 1, min(x1, width))
+                y1 = max(y0 + 1, min(y1, height))
+                w = max(1, x1 - x0)
+                h = max(1, y1 - y0)
+                return [(x0, y0, w, h)]
+
+            return []
+        except Exception:
+            # 任意异常回退到普通检测
+            pass
+
+    # 普通全人脸检测（统一使用相同 image_scale）
+    return detect_faces_with_config(
         image_data,
         width,
         height,
@@ -164,52 +226,12 @@ def detect_targets_or_all_faces(
         confidence_threshold=float(confidence_threshold),
     )
 
-    if not faces:
-        return faces
 
-    # 若没有目标库，直接返回检测结果
-    if not _TARGETS:
-        return faces
+# 旧的“基于已有检测框再识别”与“整图重新检测再识别”逻辑已移除，
+# 统一由 detect_targets_or_all_faces 在单入口内根据 _TARGETS 与 image_scale 决策。
 
-    # 若识别不可用或初始化失败，返回检测结果
-    if not init_model('auto'):
-        return faces
 
-    # 计算与目标库的相似度，命中则只返回最佳目标
-    try:
-        thr = float(recognition_threshold) if recognition_threshold is not None else float(_RECOG_THRESHOLD)
-        arr = np.frombuffer(image_data, dtype=np.uint8).reshape(height, width, 4)
-        bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
-        all_faces = _APP.get(bgr) if _APP is not None else []
-        if not all_faces:
-            return []
-
-        def cosine(a, b):
-            return float(np.dot(a, b))
-
-        best = None
-        best_score = -1.0
-        for f in all_faces:
-            emb = f.normed_embedding
-            if emb is None:
-                continue
-            emb = np.asarray(emb, dtype=np.float32)
-            # emb 已归一化
-            for _person, target in _TARGETS.items():
-                score = cosine(emb, target)
-                if score > best_score:
-                    best_score = score
-                    best = f
-        if best is not None and best_score >= thr:
-            x0, y0, x1, y1 = map(int, best.bbox)
-            w = max(1, x1 - x0)
-            h = max(1, y1 - y0)
-            return [(x0, y0, w, h)]
-        # 目标库已存在但未命中阈值：返回空（保持“仅返回命中目标”的语义）
-        return []
-    except Exception as e:
-        print(f"recognition selection failed: {e}")
-        return []
+ 
 
 
 def get_face_cascade() -> cv2.CascadeClassifier:

@@ -35,13 +35,10 @@ impl PythonEnvManager {
     }
 
     pub fn get_instance() -> &'static PythonEnvManager {
-        PYTHON_ENV_MANAGER.get_or_init(|| {
-            let mut manager = PythonEnvManager::new();
-            if let Err(e) = manager.initialize() {
-                error!("Failed to initialize Python environment manager: {}", e);
-            }
-            manager
-        })
+        // 保留函数以兼容，但不再在无 app_handle 时触发初始化，避免早期调用导致的二次并发初始化
+        PYTHON_ENV_MANAGER
+            .get()
+            .expect("PythonEnvManager is not initialized yet. Call initialize_python_environment_with_app_handle first.")
     }
 
     pub fn initialize(&mut self) -> Result<(), String> {
@@ -65,20 +62,22 @@ impl PythonEnvManager {
             
             // 3. 检查系统Python是否满足要求
             if self.check_system_python_requirements(&python_path)? {
-                info!("System Python meets requirements, using system Python");
-                // 若配置为 auto 或未设置，则在系统 Python 中尝试选择最优 ORT 变体（CUDA→DML→CPU）
-                let provider_pref = crate::config::get_config()
-                    .and_then(|c| c.face)
-                    .and_then(|f| f.recognition.provider)
-                    .unwrap_or_else(|| "auto".to_string())
-                    .to_lowercase();
-                if provider_pref == "auto" {
-                    info!("Ensuring optimal onnxruntime provider in system Python (auto)");
-                    let _ = self.auto_install_onnxruntime_in_system_python(&python_path);
+                info!("System Python meets requirements; creating isolated virtual environment for stability");
+                // 统一使用隔离的 venv，避免系统环境漂移导致间歇性失败
+                emitter::emit_toast("系统 Python 就绪，创建隔离环境…");
+                let virtual_env_path = self.create_virtual_environment()?;
+                self.virtual_env_path = Some(virtual_env_path.clone());
+                info!("Created virtual environment at: {:?}", virtual_env_path);
+                emitter::emit_toast("正在安装必要依赖（隔离环境）…");
+                self.install_required_packages(&virtual_env_path)?;
+                emitter::emit_toast("正在验证环境…");
+                if !self.verify_environment_ready()? {
+                    emitter::emit_toast("Python 环境验证失败");
+                    return Err("Python environment verification failed in venv".to_string());
                 }
-                emitter::emit_toast("系统 Python 就绪，正在完成初始化…");
                 self.is_initialized = true;
-                emitter::emit_toast_close();
+                info!("Python environment (venv) initialized successfully");
+                emitter::emit_toast("Python 环境初始化完成（即将加载人脸模型）");
                 return Ok(());
             } else {
                 info!("System Python found but missing required packages");
@@ -88,9 +87,8 @@ impl PythonEnvManager {
                 emitter::emit_toast("系统 Python 缺少依赖，正在安装缺失包…");
                 if self.install_packages_in_system_python(&python_path)? {
                     info!("Successfully installed packages in system Python");
-                    emitter::emit_toast("依赖安装完成，正在完成初始化…");
+                    emitter::emit_toast("依赖安装完成，继续初始化…");
                     self.is_initialized = true;
-                    emitter::emit_toast_close();
                     return Ok(());
                 } else {
                     info!("Failed to install packages in system Python, falling back to virtual environment");
@@ -139,57 +137,62 @@ impl PythonEnvManager {
 
         self.is_initialized = true;
         info!("Python environment manager initialized successfully");
-        emitter::emit_toast("Python 环境初始化完成");
-        emitter::emit_toast_close();
+        emitter::emit_toast("Python 环境初始化完成（即将加载人脸模型）");
         Ok(())
     }
 
     // 在虚拟环境内自动安装最优 ORT 变体（CUDA→DML→CPU）
     fn auto_install_onnxruntime_in_venv(&self, venv_path: &Path) -> Result<(), String> {
-        let pip_path = self.get_pip_path(venv_path)?;
         let python_path = self.get_python_executable_from_venv(venv_path)?;
+        self.ensure_pip_in_venv(venv_path)?;
 
         // 尝试 CUDA 版
-        let _ = Command::new(&pip_path).arg("install").arg("-U").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        if self.python_has_provider(&python_path, "CUDAExecutionProvider")?
-            && self.python_can_use_cuda(&python_path)? {
-            info!("Using CUDAExecutionProvider in venv");
-            return Ok(());
+        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        if self.python_has_provider(&python_path, "CUDAExecutionProvider")? {
+            if self.python_can_use_cuda(&python_path)? {
+                info!("Using CUDAExecutionProvider in venv");
+                return Ok(());
+            } else {
+                info!("CUDAExecutionProvider available but CUDA runtime DLLs not found; falling back to DML/CPU");
+            }
         }
 
         // 回退到 DML 版（Windows 下可用）
-        let _ = Command::new(&pip_path).arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let _ = Command::new(&pip_path).arg("install").arg("-U").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(&python_path, "DmlExecutionProvider")? {
             info!("Using DmlExecutionProvider in venv");
             return Ok(());
         }
 
         // 最后回退到 CPU 版
-        let _ = Command::new(&pip_path).arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let out = Command::new(&pip_path).arg("install").arg("-U").arg("onnxruntime").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = Command::new(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let out = Command::new(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         match out { Ok(o) if o.status.success() => Ok(()), _ => Err("Failed to install onnxruntime (CPU)".to_string()) }
     }
 
     // 在系统 Python 内自动安装最优 ORT 变体（CUDA→DML→CPU）
     fn auto_install_onnxruntime_in_system_python(&self, python_path: &Path) -> Result<(), String> {
         // CUDA 版
-        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        if self.python_has_provider(python_path, "CUDAExecutionProvider")?
-            && self.python_can_use_cuda(python_path)? {
-            info!("Using CUDAExecutionProvider in system python");
-            return Ok(());
+        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        if self.python_has_provider(python_path, "CUDAExecutionProvider")? {
+            if self.python_can_use_cuda(python_path)? {
+                info!("Using CUDAExecutionProvider in system python");
+                return Ok(());
+            } else {
+                info!("CUDAExecutionProvider available but CUDA runtime DLLs not found in system python; falling back to DML/CPU");
+            }
         }
         // DML 版
         let _ = Command::new(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(python_path, "DmlExecutionProvider")? {
             info!("Using DmlExecutionProvider in system python");
             return Ok(());
         }
         // CPU 版
         let _ = Command::new(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-directml").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
-        let out = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let out = Command::new(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         match out { Ok(o) if o.status.success() => Ok(()), _ => Err("Failed to install onnxruntime (CPU) in system python".to_string()) }
     }
 
@@ -209,7 +212,18 @@ impl PythonEnvManager {
     fn python_can_use_cuda(&self, python_path: &Path) -> Result<bool, String> {
         #[cfg(target_os = "windows")]
         {
-            let code = "import ctypes, sys;\nnames=['cublasLt64_12.dll','cudart64_12.dll'];\nok=True\n\nfor n in names:\n    try:\n        ctypes.WinDLL(n)\n    except Exception:\n        ok=False\nprint(ok)";
+            // 同时兼容 CUDA 12 与 CUDA 11 常见运行库 DLL 名称
+            let code = r#"import ctypes
+names_12=['cublasLt64_12.dll','cudart64_12.dll']
+names_11=['cublasLt64_11.dll','cudart64_110.dll','cudart64_101.dll']
+def ok(names):
+    try:
+        for n in names:
+            ctypes.WinDLL(n)
+        return True
+    except Exception:
+        return False
+print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             let out = Command::new(python_path)
                 .arg("-c").arg(code)
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
@@ -386,6 +400,8 @@ impl PythonEnvManager {
         
         match result {
             Ok(output) if output.status.success() => {
+                // 确保 venv 内有 pip（某些发行版禁用了 ensurepip）
+                self.ensure_pip_in_venv(&venv_path)?;
                 info!("Created virtual environment at: {:?}", venv_path);
                 Ok(venv_path)
             }
@@ -400,10 +416,11 @@ impl PythonEnvManager {
 
 
     fn install_required_packages(&self, venv_path: &Path) -> Result<(), String> {
-        let pip_path = self.get_pip_path(venv_path)?;
+        let python_path = self.get_python_executable_from_venv(venv_path)?;
+        self.ensure_pip_in_venv(venv_path)?;
         // 先升级 pip/setuptools/wheel 提高兼容性
-        let _ = Command::new(&pip_path)
-            .arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
+        let _ = Command::new(&python_path)
+            .arg("-m").arg("pip").arg("install").arg("-U").arg("pip").arg("setuptools").arg("wheel")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         // 识别依赖安装策略：provider=auto 时启用自动探测（CUDA→DML→CPU），否则按固定 provider 安装
         let provider_pref = crate::config::get_config()
@@ -428,9 +445,8 @@ impl PythonEnvManager {
                         "正在安装 {}... ({:.1}%)", package, progress
                     ));
                 }
-                let result = Command::new(&pip_path)
-                    .arg("install")
-                    .arg(package)
+                let result = Command::new(&python_path)
+                    .arg("-m").arg("pip").arg("install").arg(package)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output();
@@ -455,9 +471,8 @@ impl PythonEnvManager {
             let package = "insightface";
             info!("Installing package: {}", package);
             if let Some(ref handle) = app_handle { let _ = handle.emit("python-installation-progress", "正在安装 insightface... (75.0%)"); }
-            let result = Command::new(&pip_path)
-                .arg("install")
-                .arg(package)
+            let result = Command::new(&python_path)
+                .arg("-m").arg("pip").arg("install").arg(package)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output();
@@ -492,9 +507,8 @@ impl PythonEnvManager {
                         "正在安装 {}... ({:.1}%)", package, progress
                     ));
                 }
-                let result = Command::new(&pip_path)
-                    .arg("install")
-                    .arg(package)
+                let result = Command::new(&python_path)
+                    .arg("-m").arg("pip").arg("install").arg(package)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output();
@@ -676,6 +690,66 @@ impl PythonEnvManager {
         }
         
         Err("Could not find pip executable in virtual environment".to_string())
+    }
+
+    // 确保 venv 内可用 pip；若缺失则用 ensurepip 安装
+    fn ensure_pip_in_venv(&self, venv_path: &Path) -> Result<(), String> {
+        // 快速存在性检查：优先通过 python -m pip --version 判断
+        let py = self.get_python_executable_from_venv(venv_path)?;
+        let has_pip = Command::new(&py)
+            .arg("-m").arg("pip").arg("--version")
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        if has_pip || self.get_pip_path(venv_path).is_ok() { return Ok(()); }
+
+        // 1) 尝试启用 ensurepip
+        let status = Command::new(&py)
+            .arg("-m").arg("ensurepip").arg("--upgrade")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
+        if !matches!(status, Ok(s) if s.success()) {
+            // 2) ensurepip 不可用，下载官方 get-pip.py 引导
+            #[cfg(target_os = "windows")]
+            {
+                let url = "https://bootstrap.pypa.io/get-pip.py";
+                let tmp = std::env::temp_dir().join("get-pip.py");
+                let dl = Command::new("powershell")
+                    .arg("-NoProfile").arg("-ExecutionPolicy").arg("Bypass")
+                    .arg("-Command")
+                    .arg(format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{}' -OutFile '{}'", url, tmp.display()))
+                    .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
+                if !matches!(dl, Ok(s) if s.success()) {
+                    return Err("Failed to download get-pip.py".to_string());
+                }
+                let run = Command::new(&py)
+                    .arg(tmp)
+                    .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
+                if !matches!(run, Ok(s) if s.success()) {
+                    return Err("Failed to bootstrap pip via get-pip.py".to_string());
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let url = "https://bootstrap.pypa.io/get-pip.py";
+                let tmp = std::env::temp_dir().join("get-pip.py");
+                let dl = Command::new("curl")
+                    .arg("-fsSL").arg(url).arg("-o").arg(&tmp)
+                    .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
+                if !matches!(dl, Ok(s) if s.success()) {
+                    return Err("Failed to download get-pip.py (curl)".to_string());
+                }
+                let run = Command::new(&py)
+                    .arg(tmp)
+                    .stdout(Stdio::piped()).stderr(Stdio::piped()).status();
+                if !matches!(run, Ok(s) if s.success()) {
+                    return Err("Failed to bootstrap pip via get-pip.py".to_string());
+                }
+            }
+        }
+
+        // 最终确认
+        let ok = Command::new(&py)
+            .arg("-m").arg("pip").arg("--version")
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        if ok { Ok(()) } else { Err("PIP still unavailable after bootstrap".to_string()) }
     }
 
     #[cfg(target_os = "windows")]
@@ -863,30 +937,43 @@ Python环境安装指南：
 }
 
 pub fn initialize_python_environment() -> Result<(), String> {
-    PythonEnvManager::get_instance();
+    // 兼容旧接口：不再触发隐式初始化，直接返回
     Ok(())
 }
 
 pub fn initialize_python_environment_with_app_handle(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    // 若已存在实例，则认为初始化流程已由其他线程完成/进行中
+    if PYTHON_ENV_MANAGER.get().is_some() {
+        return Ok(());
+    }
+
     let mut manager = PythonEnvManager::new();
     manager.set_app_handle(app_handle.clone());
     manager.initialize()?;
-    // 将带有 app_handle 的已初始化管理器注册为全局单例，
-    // 确保后续 get_instance()/is_python_ready() 使用同一实例
-    let _ = PYTHON_ENV_MANAGER.set(manager);
-    Ok(())
+    PYTHON_ENV_MANAGER
+        .set(manager)
+        .map_err(|_| "Python environment already initialized".to_string())
 }
 
 // 移除未使用的对外 get_python_executable 包装
 
 pub fn is_python_ready() -> bool {
-    PythonEnvManager::get_instance().is_ready()
+    PYTHON_ENV_MANAGER.get().map(|m| m.is_ready()).unwrap_or(false)
 }
 
 pub fn get_installation_guide() -> String {
-    PythonEnvManager::get_instance().get_installation_guide()
+    // 若尚未初始化，也能返回安装指引
+    if let Some(m) = PYTHON_ENV_MANAGER.get() {
+        m.get_installation_guide()
+    } else {
+        PythonEnvManager::new().get_installation_guide()
+    }
 }
 
 pub fn get_python_files_path() -> Result<PathBuf, String> {
-    PythonEnvManager::get_instance().get_python_files_path()
-} 
+    if let Some(m) = PYTHON_ENV_MANAGER.get() {
+        m.get_python_files_path()
+    } else {
+        Err("Python environment not initialized".to_string())
+    }
+}

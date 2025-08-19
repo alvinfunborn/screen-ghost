@@ -22,6 +22,7 @@ pub fn create_app_builder() -> tauri::Builder<tauri::Wry> {
             command::set_working_monitor,
             command::stop_monitoring,
             command::get_mosaic_style,
+            command::get_latest_mosaic,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
