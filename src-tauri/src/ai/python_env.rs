@@ -774,21 +774,7 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
         if ok { Ok(()) } else { Err("PIP still unavailable after bootstrap".to_string()) }
     }
 
-    #[cfg(target_os = "windows")]
-    fn append_python_dir_to_process_env(&self) {
-        if let Some(ref python) = self.python_path {
-            if let Some(dir) = python.parent() {
-                let scripts = dir.join("Scripts");
-                let old_path = env::var("PATH").unwrap_or_default();
-                let mut new_path = format!("{};{}", dir.display(), old_path);
-                if scripts.exists() {
-                    new_path = format!("{};{}", scripts.display(), new_path);
-                }
-                env::set_var("PATH", new_path);
-                env::set_var("PYTHONHOME", dir);
-            }
-        }
-    }
+    // 已不再需要：append_python_dir_to_process_env
 
     fn extract_python_files(&self) -> Result<PathBuf, String> {
         let app_data_dir = self.get_app_data_dir()?;
@@ -806,7 +792,6 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             // 相对当前工作目录
             cands.push(PathBuf::from("python"));
             cands.push(PathBuf::from("src-tauri/python"));
-            cands.push(PathBuf::from("../../src-tauri/python"));
             cands.push(PathBuf::from("../../src-tauri/python"));
             // 相对可执行文件目录
             if let Ok(exe) = std::env::current_exe() {
@@ -839,11 +824,13 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             }
         }
         
-        // 生产环境：若此前已存在则直接使用；否则尝试从源码目录复制（作为兜底）
+        // 生产环境：每次启动都覆盖复制，确保使用最新脚本
         #[cfg(not(debug_assertions))]
         {
+            // 先清空目标目录
             if python_files_dir.exists() {
-                return Ok(python_files_dir);
+                let _ = fs::remove_dir_all(&python_files_dir);
+                let _ = fs::create_dir_all(&python_files_dir);
             }
             for src_python_dir in candidate_src_dirs() {
                 if src_python_dir.exists() {
@@ -914,37 +901,13 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
 
     // 移除未使用的 get_python_executable（对外提供全局函数即可）
 
-    pub fn prepare_process_env(&self) {
-        #[cfg(target_os = "windows")]
-        {
-            self.append_python_dir_to_process_env();
-        }
-    }
+    // 已不再需要：prepare_process_env
 
     pub fn is_ready(&self) -> bool {
         self.is_initialized
     }
 
-    pub fn get_installation_guide(&self) -> String {
-        r#"
-Python环境安装指南：
-
-1. 安装Python 3.7或更高版本：
-   - Windows: 从 https://www.python.org/downloads/ 下载安装
-   - macOS: 使用 brew install python3
-   - Linux: 使用包管理器安装 python3
-
-2. 安装必要的Python包：
-   pip install opencv-python numpy
-
-3. 如果遇到权限问题，请使用：
-   pip install --user opencv-python numpy
-
-4. 重启应用程序
-
-如果问题仍然存在，请联系技术支持。
-        "#.to_string()
-    }
+    // 已不再需要：安装引导文案
 
     pub fn get_python_files_path(&self) -> Result<PathBuf, String> {
         let app_data_dir = self.get_app_data_dir()?;
@@ -958,10 +921,7 @@ Python环境安装指南：
     }
 }
 
-pub fn initialize_python_environment() -> Result<(), String> {
-    // 兼容旧接口：不再触发隐式初始化，直接返回
-    Ok(())
-}
+// 移除：initialize_python_environment 旧空实现（未被调用）
 
 pub fn initialize_python_environment_with_app_handle(app_handle: &tauri::AppHandle) -> Result<(), String> {
     // 若已存在实例，则认为初始化流程已由其他线程完成/进行中
@@ -983,14 +943,7 @@ pub fn is_python_ready() -> bool {
     PYTHON_ENV_MANAGER.get().map(|m| m.is_ready()).unwrap_or(false)
 }
 
-pub fn get_installation_guide() -> String {
-    // 若尚未初始化，也能返回安装指引
-    if let Some(m) = PYTHON_ENV_MANAGER.get() {
-        m.get_installation_guide()
-    } else {
-        PythonEnvManager::new().get_installation_guide()
-    }
-}
+// 移除：对外 get_installation_guide 旧接口（未被调用）
 
 pub fn get_python_files_path() -> Result<PathBuf, String> {
     if let Some(m) = PYTHON_ENV_MANAGER.get() {

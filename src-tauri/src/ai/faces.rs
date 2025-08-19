@@ -34,6 +34,51 @@ if r'{0}' not in sys.path:
         );
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
+        // 优先从 python_files 导入；若失败或命名冲突导入到其他包，按路径兜底加载 faces.py
+        let fallback_import = format!(
+            r#"
+import sys, os, importlib.util
+module_name = 'faces'
+try:
+    import faces as mod
+    # 若导入的 faces 不包含所需方法，视为命名冲突，按路径兜底
+    _ok = hasattr(mod, 'detect_targets_or_all_faces') or hasattr(mod, 'init_model')
+    if not _ok:
+        raise ImportError('conflicting faces module without required attributes')
+except Exception:
+    bases = []
+    # 应用数据目录（python_files）
+    bases.append(r'{p}')
+    try:
+        exe_dir = os.path.dirname(sys.executable)
+        bases.append(os.path.join(exe_dir, 'python'))
+        bases.append(os.path.join(exe_dir, 'src-tauri', 'python'))
+    except Exception:
+        pass
+    # 工作目录候选
+    try:
+        cwd = os.getcwd()
+        bases.append(os.path.join(cwd, 'python'))
+        bases.append(os.path.join(cwd, 'src-tauri', 'python'))
+    except Exception:
+        pass
+    loaded = False
+    for base in bases:
+        file_path = os.path.join(base, 'faces.py')
+        if os.path.exists(file_path):
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules[module_name] = mod
+            loaded = True
+            break
+    if not loaded:
+        raise ModuleNotFoundError('faces.py not found in candidates: ' + str(bases))
+"#,
+            p = python_files_path.to_string_lossy()
+        );
+        py.run(&fallback_import, None, None)
+            .map_err(|e| format!("Failed to load faces module: {}", e))?;
         let faces_mod = py.import("faces").map_err(|e| format!("Failed to import faces: {}", e))?;
         let face_cfg = crate::config::get_config().and_then(|c| c.face).unwrap_or_default();
         let det = face_cfg.detection;
@@ -94,24 +139,42 @@ sys.path.insert(0, r'{}')
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
 
-        let fallback_import = format!(
+        let load_from_candidates = format!(
             r#"
 import sys, os, importlib.util
 module_name = 'faces'
+# 每次启动都按路径优先级加载 faces.py，避免命名冲突并确保最新
+bases = []
 try:
-    import faces as mod
+    exe_dir = os.path.dirname(sys.executable)
+    bases.append(os.path.join(exe_dir, 'python'))
+    bases.append(os.path.join(exe_dir, 'src-tauri', 'python'))
 except Exception:
-    file_path = os.path.join(r'{p}', 'faces.py')
-    if not os.path.exists(file_path):
-        raise ModuleNotFoundError(f"faces.py not found at {{file_path}}")
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    sys.modules[module_name] = mod
+    pass
+try:
+    cwd = os.getcwd()
+    bases.append(os.path.join(cwd, 'python'))
+    bases.append(os.path.join(cwd, 'src-tauri', 'python'))
+except Exception:
+    pass
+# 最后再考虑 APPDATA 提取目录
+bases.append(r'{p}')
+loaded = False
+for base in bases:
+    file_path = os.path.join(base, 'faces.py')
+    if os.path.exists(file_path):
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.modules[module_name] = mod
+        loaded = True
+        break
+if not loaded:
+    raise ModuleNotFoundError('faces.py not found in candidates: ' + str(bases))
 "#,
             p = python_files_path.to_string_lossy()
         );
-        py.run(&fallback_import, None, None)
+        py.run(&load_from_candidates, None, None)
             .map_err(|e| format!("Failed to load faces module: {}", e))?;
 
         let faces = py.import("faces").map_err(|e| format!("Failed to import faces: {}", e))?;
@@ -146,6 +209,48 @@ sys.path.insert(0, r'{}')
         );
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
+        // 与其他入口一致，加入兜底按路径加载 faces.py
+        let fallback_import = format!(
+            r#"
+import sys, os, importlib.util
+module_name = 'faces'
+try:
+    import faces as mod
+    _ok = hasattr(mod, 'preload_targets_from_faces_dir') or hasattr(mod, 'init_model')
+    if not _ok:
+        raise ImportError('conflicting faces module without required attributes')
+except Exception:
+    bases = []
+    bases.append(r'{p}')
+    try:
+        exe_dir = os.path.dirname(sys.executable)
+        bases.append(os.path.join(exe_dir, 'python'))
+        bases.append(os.path.join(exe_dir, 'src-tauri', 'python'))
+    except Exception:
+        pass
+    try:
+        cwd = os.getcwd()
+        bases.append(os.path.join(cwd, 'python'))
+        bases.append(os.path.join(cwd, 'src-tauri', 'python'))
+    except Exception:
+        pass
+    loaded = False
+    for base in bases:
+        file_path = os.path.join(base, 'faces.py')
+        if os.path.exists(file_path):
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules[module_name] = mod
+            loaded = True
+            break
+    if not loaded:
+        raise ModuleNotFoundError('faces.py not found in candidates: ' + str(bases))
+"#,
+            p = python_files_path.to_string_lossy()
+        );
+        py.run(&fallback_import, None, None)
+            .map_err(|e| format!("Failed to load faces module: {}", e))?;
         let faces = py.import("faces").map_err(|e| format!("Failed to import faces: {}", e))?;
         let rec = crate::config::get_config().and_then(|c| c.face).map(|f| f.recognition).unwrap_or_default();
         let stats: std::collections::HashMap<String, i32> = faces

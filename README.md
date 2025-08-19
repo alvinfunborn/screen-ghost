@@ -50,6 +50,8 @@
    your-directory/
    ├── screen-ghost.exe
    ├── config.toml
+   ├── python/
+       ├── faces.py
    └── faces/
        ├── Zhang San/
        │   ├── photo1.jpg
@@ -85,6 +87,19 @@ cargo build
 cd ..
 npm run tauri dev
 ```
+
+---
+
+### Environment Initialization & On-disk Locations
+
+- Installation / write locations (Windows)
+  - Python virtual environment: `%APPDATA%/screen-ghost/python_env/`
+  - Extracted Python scripts: `%APPDATA%/screen-ghost/python_files/`
+  - App config (example): `config.toml` (next to the exe)
+  - Target face library: `faces/` (next to the exe)
+- Startup behavior
+  - Prefers copying scripts from the exe-side `python/` to `python_files/`
+  - Python dependencies (numpy/opencv/onnxruntime/insightface) are installed into an isolated venv; with `provider=auto`, the best ONNX Runtime variant is selected in order CUDA→DML→CPU.
 
 ---
 

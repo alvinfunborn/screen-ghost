@@ -44,6 +44,8 @@
    your-directory/
    ├── screen-ghost.exe
    ├── config.toml
+   ├── python/
+       ├── faces.py
    └── faces/
        ├── 张三/
        │   ├── photo1.jpg
@@ -128,4 +130,15 @@ log_level = "debug"
 - **组织**：一人一文件夹，不要混入他人照片；方向异常请先修正
 
 应用启动时会预加载该目录，计算每人的“均值特征”，并按阈值/迭代剔除离群样本。
+
+### 环境初始化与落盘位置
+
+- 安装/写入位置（Windows）
+  - Python 虚拟环境：`%APPDATA%/screen-ghost/python_env/`
+  - Python 脚本提取目录：`%APPDATA%/screen-ghost/python_files/`
+  - 应用配置（示例）：`config.toml`（与 exe 同级）
+  - 目标人脸库：`faces/`（与 exe 同级）
+- 每次启动的初始化行为
+  - 优先从 exe 同级目录的 `python/` 复制脚本到 `python_files/`
+  - Python 依赖（numpy/opencv/onnxruntime/insightface）会在隔离的 venv 中安装；`provider=auto` 会自动选择 CUDA→DML→CPU 的最佳 ORT 变体。
 
