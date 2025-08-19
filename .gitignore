@@ -37,3 +37,4 @@ build/
 **/.history
 **/node_modules
 **/.cursorindexingignore
+**/.serena

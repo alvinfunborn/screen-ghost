@@ -896,19 +896,19 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
         {
             let app_data = std::env::var("APPDATA")
                 .map_err(|_| "Could not get APPDATA environment variable".to_string())?;
-            Ok(PathBuf::from(app_data).join("screen-ghost-rust"))
+            Ok(PathBuf::from(app_data).join("screen-ghost"))
         }
         #[cfg(target_os = "macos")]
         {
             let home = std::env::var("HOME")
                 .map_err(|_| "Could not get HOME environment variable".to_string())?;
-            Ok(PathBuf::from(home).join("Library/Application Support/screen-ghost-rust"))
+            Ok(PathBuf::from(home).join("Library/Application Support/screen-ghost"))
         }
         #[cfg(target_os = "linux")]
         {
             let home = std::env::var("HOME")
                 .map_err(|_| "Could not get HOME environment variable".to_string())?;
-            Ok(PathBuf::from(home).join(".config/screen-ghost-rust"))
+            Ok(PathBuf::from(home).join(".config/screen-ghost"))
         }
     }
 
