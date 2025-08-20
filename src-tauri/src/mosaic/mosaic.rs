@@ -6,4 +6,5 @@ pub struct Mosaic {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub angle: f32,
 }

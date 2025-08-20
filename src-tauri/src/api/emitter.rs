@@ -1,4 +1,5 @@
 use tauri::Emitter;
+use serde::Serialize;
 use std::sync::{OnceLock, Mutex, Condvar};
 use crate::{app::AppState, monitor::Image, utils::rect::Rect};
 
@@ -70,4 +71,19 @@ pub fn emit_frame_info(frame_info: Vec<Rect>) {
     let app = AppState::get_global().unwrap();
     let handle = app.handle;
     handle.emit("frame_info", frame_info).unwrap();
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FaceAngleEventItem {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub angle: f32,
+}
+
+pub fn emit_frame_info_with_angle(items: Vec<FaceAngleEventItem>) {
+    let app = AppState::get_global().unwrap();
+    let handle = app.handle;
+    let _ = handle.emit("frame_info_angle", items);
 }

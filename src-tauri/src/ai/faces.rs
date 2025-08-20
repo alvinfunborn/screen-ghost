@@ -121,6 +121,106 @@ except Exception:
     })
 }
 
+/// 带角度的人脸检测：若存在识别目标，返回命中的目标框与 roll；否则返回所有检测框与 0.0 角度
+pub fn detect_faces_with_angle(image: &Image) -> Result<Vec<(Rect, f32)>, String> {
+    Python::with_gil(|py| {
+        let python_files_path = python_env::get_python_files_path()
+            .map_err(|e| format!("Failed to get python files path: {}", e))?;
+        let path_setup = format!(
+            r#"
+import sys
+import os
+if r'{0}' not in sys.path:
+    sys.path.insert(0, r'{0}')
+"#,
+            python_files_path.to_string_lossy()
+        );
+        py.run(&path_setup, None, None)
+            .map_err(|e| format!("Failed to setup Python path: {}", e))?;
+        // 兜底按路径加载 faces.py，避免命名冲突
+        let fallback_import = format!(
+            r#"
+import sys, os, importlib.util
+module_name = 'faces'
+try:
+    import faces as mod
+    _ok = hasattr(mod, 'detect_targets_or_all_faces_with_angle') or hasattr(mod, 'init_model')
+    if not _ok:
+        raise ImportError('conflicting faces module without required attributes')
+except Exception:
+    bases = []
+    bases.append(r'{p}')
+    try:
+        exe_dir = os.path.dirname(sys.executable)
+        bases.append(os.path.join(exe_dir, 'python'))
+        bases.append(os.path.join(exe_dir, 'src-tauri', 'python'))
+    except Exception:
+        pass
+    try:
+        cwd = os.getcwd()
+        bases.append(os.path.join(cwd, 'python'))
+        bases.append(os.path.join(cwd, 'src-tauri', 'python'))
+    except Exception:
+        pass
+    loaded = False
+    for base in bases:
+        file_path = os.path.join(base, 'faces.py')
+        if os.path.exists(file_path):
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            sys.modules[module_name] = mod
+            loaded = True
+            break
+    if not loaded:
+        raise ModuleNotFoundError('faces.py not found in candidates: ' + str(bases))
+"#,
+            p = python_files_path.to_string_lossy()
+        );
+        py.run(&fallback_import, None, None)
+            .map_err(|e| format!("Failed to load faces module: {}", e))?;
+
+        let faces_mod = py.import("faces").map_err(|e| format!("Failed to import faces: {}", e))?;
+        let face_cfg = crate::config::get_config().and_then(|c| c.face).unwrap_or_default();
+        let det = face_cfg.detection;
+        let rec = face_cfg.recognition;
+        let (min_size_px, max_size_px) = {
+            let short_edge = image.width.min(image.height).max(1);
+            let min_px = det
+                .min_face_ratio
+                .and_then(|r| if r > 0.0 { Some(((short_edge as f32) * r).round() as i32) } else { None })
+                .unwrap_or(det.min_face_size.unwrap_or(64));
+            let max_px = det
+                .max_face_ratio
+                .and_then(|r| if r > 0.0 { Some(((short_edge as f32) * r).round() as i32) } else { None })
+                .unwrap_or(det.max_face_size.unwrap_or(800));
+            (min_px, max_px)
+        };
+
+        let res: Vec<(i32, i32, i32, i32, f32)> = faces_mod
+            .call_method1(
+                "detect_targets_or_all_faces_with_angle",
+                (
+                    PyBytes::new(py, &image.data),
+                    image.width,
+                    image.height,
+                    det.use_gray,
+                    det.image_scale,
+                    min_size_px,
+                    max_size_px,
+                    det.scale_factor,
+                    det.min_neighbors,
+                    det.confidence_threshold,
+                    rec.threshold,
+                ),
+            )
+            .map_err(|e| format!("Failed to call detect_targets_or_all_faces_with_angle: {}", e))?
+            .extract()
+            .map_err(|e| format!("Failed to extract faces result: {}", e))?;
+        Ok(res.into_iter().map(|(x,y,w,h,a)| (Rect::new(x,y,w,h), a)).collect())
+    })
+}
+
 // 检测与识别完全委托给 Python 端
 pub fn initialize_face_recognition() -> Result<(), String> {
     if !python_env::is_python_ready() {

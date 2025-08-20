@@ -173,41 +173,50 @@ fn cal() {
 
             // 人脸检测耗时统计开始
             let face_start = std::time::Instant::now();
-            match faces::detect_targets_or_all_faces(&detection_image) {
-                Ok(rects) => {
+            match faces::detect_faces_with_angle(&detection_image) {
+                Ok(rects_with_angle) => {
                     // 输出人脸检测用时（info级别）
                     let face_elapsed_ms = face_start.elapsed().as_millis();
                     info!("[perf] face_detection {} ms", face_elapsed_ms);
 
-                    if rects.is_empty() {
+                    if rects_with_angle.is_empty() {
                         debug!("[cal] no faces detected");
                     }
 
                     // 将检测框从缩小坐标系映射回原始分辨率
-                    let mapped_rects: Vec<Rect> = if (resize_ratio - 1.0).abs() < f32::EPSILON {
-                        rects
+                    let mapped_rects_with_angle: Vec<(Rect, f32)> = if (resize_ratio - 1.0).abs() < f32::EPSILON {
+                        rects_with_angle
                     } else {
                         let inv = 1.0f32 / resize_ratio;
-                        rects
+                        rects_with_angle
                             .into_iter()
-                            .map(|r| Rect::new(
+                            .map(|(r, a)| (Rect::new(
                                 ((r.x as f32) * inv).round() as i32,
                                 ((r.y as f32) * inv).round() as i32,
                                 ((r.width as f32) * inv).round() as i32,
                                 ((r.height as f32) * inv).round() as i32,
-                            ))
+                            ), a))
                             .collect()
                     };
 
                     // 对前端 app 布局发送映射回原分辨率的检测框
-                    emitter::emit_frame_info(mapped_rects.clone());
+                    let just_rects: Vec<Rect> = mapped_rects_with_angle.iter().map(|(r, _)| r.clone()).collect();
+                    emitter::emit_frame_info(just_rects.clone());
+
+                    // 追加发送带角度的事件（新事件名），供前端有能力时使用
+                    let angle_items: Vec<emitter::FaceAngleEventItem> = mapped_rects_with_angle
+                        .iter()
+                        .map(|(r, a)| emitter::FaceAngleEventItem { x: r.x, y: r.y, width: r.width, height: r.height, angle: *a })
+                        .collect();
+                    emitter::emit_frame_info_with_angle(angle_items);
 
                     // 叠加马赛克：mosaic_scale 控制马赛克矩形自身放大比例；dpi_scale 用于前端坐标换算
                     let mosaic_scale = config::get_config()
                         .and_then(|c| c.monitoring)
                         .map(|m| m.mosaic_scale)
                         .unwrap_or(1.0f32);
-                    crate::overlay::overlay::apply_mosaic(mapped_rects, mosaic_scale, monitor.scale_factor);
+                    let rects_for_mosaic_with_angle = mapped_rects_with_angle.clone();
+                    crate::overlay::overlay::apply_mosaic_with_angle(rects_for_mosaic_with_angle, mosaic_scale, monitor.scale_factor);
                 }
                 Err(e) => {
                     // 输出人脸检测用时（即便失败也记录耗时）

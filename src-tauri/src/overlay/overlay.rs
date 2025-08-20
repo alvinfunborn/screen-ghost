@@ -87,7 +87,7 @@ pub fn apply_mosaic(rects: Vec<Rect>, mosaic_scale: f32, dpi_scale: f64) {
             let h = new_h_f.round() as i32;
             let x = rect.x - dx;
             let y = rect.y - dy;
-            Mosaic { x, y, width: w, height: h }
+            Mosaic { x, y, width: w, height: h, angle: 0.0 }
         })
         .collect();
     
@@ -109,6 +109,43 @@ pub fn apply_mosaic(rects: Vec<Rect>, mosaic_scale: f32, dpi_scale: f64) {
     });
     set_latest(&payload);
     // 主动按 60fps 推送最新一帧到前端（只发最新，不合并）
+    set_latest_for_emit(&payload);
+    spawn_emit_thread_once();
+}
+
+// 带角度版本：items 为 (Rect, angle_deg)
+pub fn apply_mosaic_with_angle(items: Vec<(Rect, f32)>, mosaic_scale: f32, dpi_scale: f64) {
+    // 在发送给 overlay 前进行缩放：保持中心不变
+    let s = mosaic_scale;
+    let mosaics: Vec<Mosaic> = items
+        .into_iter()
+        .map(|(rect, angle)| {
+            let new_w_f = (rect.width as f32) * s;
+            let new_h_f = (rect.height as f32) * s;
+            let dx = ((new_w_f - rect.width as f32) / 2.0).round() as i32;
+            let dy = ((new_h_f - rect.height as f32) / 2.0).round() as i32;
+            let w = new_w_f.round() as i32;
+            let h = new_h_f.round() as i32;
+            let x = rect.x - dx;
+            let y = rect.y - dy;
+            Mosaic { x, y, width: w, height: h, angle }
+        })
+        .collect();
+
+    info!("[apply_mosaic_with_angle] Applying {} mosaics (mosaic_scale={}, dpi_scale={})", mosaics.len(), mosaic_scale, dpi_scale);
+
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let now_ms: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "mosaics": mosaics,
+        "scale_factor": dpi_scale,
+        "seq": seq,
+        "ts": now_ms
+    });
+    set_latest(&payload);
     set_latest_for_emit(&payload);
     spawn_emit_thread_once();
 }

@@ -202,7 +202,7 @@
             });
         }
         
-        // 应用马赛克（Canvas 渲染）
+        // 应用马赛克（Canvas 渲染），支持每块的 angle（度，逆时针为正，绕中心旋转）
         function applyMosaicsInternal(payload) {
             if (!payload || !payload.mosaics || !Array.isArray(payload.mosaics)) {
                 return;
@@ -225,6 +225,10 @@
                 const logicalY = rect.y / scaleFactor;
                 const logicalWidth = rect.width / scaleFactor;
                 const logicalHeight = rect.height / scaleFactor;
+                const angleDeg = typeof rect.angle === 'number' ? rect.angle : 0;
+                const angleRad = angleDeg * Math.PI / 180;
+                const cx = logicalX + logicalWidth / 2;
+                const cy = logicalY + logicalHeight / 2;
                 if (__mosaicMode === 'stretch' && window.__mosaicImage__) {
                     const img = window.__mosaicImage__;
                     const imgW = img.naturalWidth || img.width;
@@ -244,15 +248,25 @@
                             ctx.beginPath();
                             ctx.rect(logicalX, logicalY, logicalWidth, logicalHeight);
                             ctx.clip();
-                            ctx.drawImage(img, dx, dy, dw, dh);
+                            ctx.translate(cx, cy);
+                            ctx.rotate(angleRad);
+                            ctx.translate(-logicalWidth/2, -logicalHeight/2);
+                            ctx.drawImage(img, dx - logicalX, dy - logicalY, dw, dh);
                             ctx.restore();
                             continue;
                         }
                     }
-                    ctx.drawImage(img, dx, dy, dw, dh);
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.rotate(angleRad);
+                    ctx.translate(-logicalWidth/2, -logicalHeight/2);
+                    ctx.drawImage(img, dx - logicalX, dy - logicalY, dw, dh);
+                    ctx.restore();
                 } else {
                     ctx.save();
-                    ctx.translate(logicalX, logicalY);
+                    ctx.translate(cx, cy);
+                    ctx.rotate(angleRad);
+                    ctx.translate(-logicalWidth/2, -logicalHeight/2);
                     if (__mosaicPattern) {
                         ctx.fillStyle = __mosaicPattern;
                     } else {

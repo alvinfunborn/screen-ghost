@@ -316,6 +316,129 @@ def detect_faces_with_config(
         return []
 
 
+def _estimate_roll_deg_from_points(pts: np.ndarray) -> float:
+    try:
+        if pts is None:
+            return 0.0
+        pts = np.asarray(pts, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            return 0.0
+        # 优先使用双眼估计：InsightFace 5 点关键点通常顺序为 [left_eye, right_eye, nose, left_mouth, right_mouth]
+        if pts.shape[0] >= 2:
+            left_eye = pts[0]
+            right_eye = pts[1]
+            dx = float(right_eye[0] - left_eye[0])
+            dy = float(right_eye[1] - left_eye[1])
+            if dx == 0.0 and dy == 0.0:
+                return 0.0
+            ang = float(np.degrees(np.arctan2(dy, dx)))
+            return ang
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def detect_targets_or_all_faces_with_angle(
+    image_data: bytes,
+    width: int,
+    height: int,
+    use_gray: bool,
+    image_scale: float,
+    min_face_size: int,
+    max_face_size: int,
+    scale_factor: float,
+    min_neighbors: int,
+    confidence_threshold: float,
+    recognition_threshold: float | None = None,
+) -> List[Tuple[int,int,int,int,float]]:
+    """
+    与 detect_targets_or_all_faces 一致，但额外返回每个框对应的滚转角（roll, 度数，逆时针为正）。
+    - 目标路径（_TARGETS 存在）：返回命中目标的单个人脸与角度。
+    - 普通检测路径：返回所有检测框，角度为 0.0（Haar 无关键点估计）。
+    """
+    # 若存在目标，优先走“目标检测”路径
+    if _TARGETS:
+        try:
+            if not init_model('auto'):
+                raise RuntimeError('model init failed')
+
+            arr = np.frombuffer(image_data, dtype=np.uint8).reshape(height, width, 4)
+            bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            scale = float(image_scale) if image_scale and image_scale > 0 else 1.0
+            if abs(scale - 1.0) > 1e-6:
+                sw = max(1, int(round(width * scale)))
+                sh = max(1, int(round(height * scale)))
+                bgr_scaled = cv2.resize(bgr, (sw, sh), interpolation=cv2.INTER_LINEAR)
+                inv = 1.0 / scale
+            else:
+                bgr_scaled = bgr
+                inv = 1.0
+
+            faces_info = _APP.get(bgr_scaled)
+            if not faces_info:
+                return []
+
+            thr = float(recognition_threshold) if recognition_threshold is not None else float(_RECOG_THRESHOLD)
+
+            def cosine(a: np.ndarray, b: np.ndarray) -> float:
+                return float(np.dot(a, b))
+
+            best = None
+            best_score = -1.0
+            for f in faces_info:
+                emb = getattr(f, 'normed_embedding', None)
+                if emb is None:
+                    continue
+                emb = np.asarray(emb, dtype=np.float32)
+                for _person, target in _TARGETS.items():
+                    score = cosine(emb, target)
+                    if score > best_score:
+                        best_score = score
+                        best = f
+
+            if best is not None and best_score >= thr:
+                x0, y0, x1, y1 = map(float, best.bbox)
+                # 关键点字段兼容：kps 或 landmark/landmark_2d_106
+                pts = None
+                if hasattr(best, 'kps') and best.kps is not None:
+                    pts = np.asarray(best.kps, dtype=np.float32)
+                elif hasattr(best, 'landmark') and best.landmark is not None:
+                    pts = np.asarray(best.landmark, dtype=np.float32)
+                elif hasattr(best, 'landmark_2d_106') and best.landmark_2d_106 is not None:
+                    pts = np.asarray(best.landmark_2d_106, dtype=np.float32)
+                angle = _estimate_roll_deg_from_points(pts)
+
+                # 映射回原分辨率
+                x0 = int(round(x0 * inv)); y0 = int(round(y0 * inv))
+                x1 = int(round(x1 * inv)); y1 = int(round(y1 * inv))
+                x0 = max(0, min(x0, width - 1))
+                y0 = max(0, min(y0, height - 1))
+                x1 = max(x0 + 1, min(x1, width))
+                y1 = max(y0 + 1, min(y1, height))
+                w = max(1, x1 - x0)
+                h = max(1, y1 - y0)
+                return [(x0, y0, w, h, float(angle))]
+
+            return []
+        except Exception:
+            # 任意异常回退到普通检测
+            pass
+
+    # 普通全人脸检测：沿用 Haar，角度置 0.0
+    rects = detect_faces_with_config(
+        image_data,
+        width,
+        height,
+        use_gray=bool(use_gray),
+        image_scale=float(image_scale),
+        min_face_size=int(min_face_size),
+        max_face_size=int(max_face_size),
+        scale_factor=float(scale_factor),
+        min_neighbors=int(min_neighbors),
+        confidence_threshold=float(confidence_threshold),
+    )
+    return [(x, y, w, h, 0.0) for (x, y, w, h) in rects]
+
 def _candidate_faces_dirs() -> list[str]:
     import sys, os
     cands = []

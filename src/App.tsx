@@ -20,6 +20,10 @@ interface Rect {
   height: number;
 }
 
+interface FaceAngleItem extends Rect {
+  angle: number; // degrees, CCW positive
+}
+
 interface ImagePayload {
   width: number;
   height: number;
@@ -33,6 +37,7 @@ function App() {
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [selectedMonitor, setSelectedMonitor] = useState<MonitorInfo | null>(null);
   const [faceRects, setFaceRects] = useState<Rect[]>([]);
+  const [faceAngles, setFaceAngles] = useState<FaceAngleItem[]>([]);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({ width: 800, height: 400 });
   const imageCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -54,6 +59,28 @@ function App() {
     });
     return () => {
       unlisten.then(fn => fn()).catch(err => console.error("Failed to cleanup frame_info listener", err));
+    };
+  }, [selectedMonitor]);
+
+  // Listen for frame_info_angle (face rectangles with angle) events
+  useEffect(() => {
+    if (!selectedMonitor) return;
+    console.log("Setting up frame_info_angle listener for monitor:", selectedMonitor.id);
+    const unlisten = listen<FaceAngleItem[]>("frame_info_angle", (event) => {
+      const payload = event.payload as unknown;
+      const items = Array.isArray(payload) ? (payload as FaceAngleItem[]) : [];
+      // 容错：确保字段完整
+      const sanitized = items.map(it => ({
+        x: Math.round(Number(it.x) || 0),
+        y: Math.round(Number(it.y) || 0),
+        width: Math.max(1, Math.round(Number(it.width) || 0)),
+        height: Math.max(1, Math.round(Number(it.height) || 0)),
+        angle: Number(it.angle) || 0,
+      }));
+      setFaceAngles(sanitized);
+    });
+    return () => {
+      unlisten.then(fn => fn()).catch(err => console.error("Failed to cleanup frame_info_angle listener", err));
     };
   }, [selectedMonitor]);
 
@@ -227,7 +254,35 @@ function App() {
             )}
 
             {/* Face rectangles overlay for selected monitor */}
-            {selectedMonitor && faceRects.map((r, idx) => {
+            {selectedMonitor && faceAngles.map((it, idx) => {
+              const cx = offsetX + (selectedMonitor.x - bounds.minX + it.x + it.width / 2) * scale;
+              const cy = offsetY + (selectedMonitor.y - bounds.minY + it.y + it.height / 2) * scale;
+              const width = it.width * scale;
+              const height = it.height * scale;
+              const angle = it.angle; // degrees, CCW
+              // 以中心为旋转基点：translate(center) -> rotate(angle) -> translate(-w/2,-h/2)
+              const transform = `translate(${cx}px, ${cy}px) rotate(${angle}deg) translate(${-width/2}px, ${-height/2}px)`;
+              return (
+                <div
+                  key={`face-rot-${idx}`}
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    width,
+                    height,
+                    border: '2px solid #4caf50',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'none',
+                    transform,
+                    transformOrigin: 'top left',
+                  }}
+                  title={`face ${idx+1}: (${it.x}, ${it.y}, ${it.width}x${it.height}), angle=${angle.toFixed(1)}°`}
+                />
+              );
+            })}
+            {/* 兼容：当没有 angle 事件（例如无目标库）时，仍显示无旋转矩形 */}
+            {selectedMonitor && faceAngles.length === 0 && faceRects.map((r, idx) => {
               const left = offsetX + (selectedMonitor.x - bounds.minX + r.x) * scale;
               const top = offsetY + (selectedMonitor.y - bounds.minY + r.y) * scale;
               const width = r.width * scale;
