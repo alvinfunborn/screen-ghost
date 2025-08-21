@@ -208,8 +208,8 @@
                 return;
             }
 
-            // 更新scale_factor
-            if (payload.scale_factor) {
+            // 更新scale_factor（仅记录）。实际坐标换算优先使用当前窗口 devicePixelRatio，避免 DPI 不匹配
+            if (typeof payload.scale_factor === 'number') {
                 scaleFactor = payload.scale_factor;
                 vlog(`[Overlay] Updated scale_factor to: ${scaleFactor}`);
             }
@@ -219,16 +219,33 @@
             const w = mosaicCanvas.width / devicePixelRatioCached;
             const h = mosaicCanvas.height / devicePixelRatioCached;
             ctx.clearRect(0, 0, w, h);
+            // 坐标换算采用“物理像素 -> CSS逻辑像素”：优先使用当前窗口的 devicePixelRatio
+            const coordScale = (typeof scaleFactor === 'number' && Math.abs(scaleFactor - devicePixelRatioCached) < 0.01)
+                ? scaleFactor
+                : devicePixelRatioCached;
+
             for (let i = 0; i < rects.length; i++) {
                 const rect = rects[i];
-                const logicalX = rect.x / scaleFactor;
-                const logicalY = rect.y / scaleFactor;
-                const logicalWidth = rect.width / scaleFactor;
-                const logicalHeight = rect.height / scaleFactor;
+                const logicalX = rect.x / coordScale;
+                const logicalY = rect.y / coordScale;
+                const logicalWidth = rect.width / coordScale;
+                const logicalHeight = rect.height / coordScale;
                 const angleDeg = typeof rect.angle === 'number' ? rect.angle : 0;
                 const angleRad = angleDeg * Math.PI / 180;
                 const cx = logicalX + logicalWidth / 2;
                 const cy = logicalY + logicalHeight / 2;
+                // 与屏幕（画布）可视区域求交，避免“超过一半就整体消失”的错觉
+                const ix1 = Math.max(0, logicalX);
+                const iy1 = Math.max(0, logicalY);
+                const ix2 = Math.min(w, logicalX + logicalWidth);
+                const iy2 = Math.min(h, logicalY + logicalHeight);
+                if (ix2 <= ix1 || iy2 <= iy1) {
+                    continue; // 完全在可视区域外
+                }
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(ix1, iy1, ix2 - ix1, iy2 - iy1);
+                ctx.clip();
                 if (__mosaicMode === 'stretch' && window.__mosaicImage__) {
                     const img = window.__mosaicImage__;
                     const imgW = img.naturalWidth || img.width;
@@ -242,19 +259,7 @@
                         dh = imgH * s;
                         dx = logicalX + (logicalWidth - dw) / 2;
                         dy = logicalY + (logicalHeight - dh) / 2;
-                        if (__mosaicFit === 'cover') {
-                            // 避免超出目标矩形，进行裁剪
-                            ctx.save();
-                            ctx.beginPath();
-                            ctx.rect(logicalX, logicalY, logicalWidth, logicalHeight);
-                            ctx.clip();
-                            ctx.translate(cx, cy);
-                            ctx.rotate(angleRad);
-                            ctx.translate(-logicalWidth/2, -logicalHeight/2);
-                            ctx.drawImage(img, dx - logicalX, dy - logicalY, dw, dh);
-                            ctx.restore();
-                            continue;
-                        }
+                        // cover 已由上方统一裁剪到屏幕与目标矩形交集
                     }
                     ctx.save();
                     ctx.translate(cx, cy);
@@ -275,6 +280,8 @@
                     ctx.fillRect(0, 0, logicalWidth, logicalHeight);
                     ctx.restore();
                 }
+                // 结束对该马赛克的裁剪上下文
+                ctx.restore();
             }
             vlog(`[Overlay] Canvas applied ${rects.length} mosaics (scale_factor=${scaleFactor})`);
         }

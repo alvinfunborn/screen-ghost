@@ -23,14 +23,19 @@ pub fn detect_targets_or_all_faces(image: &Image) -> Result<Vec<Rect>, String> {
     Python::with_gil(|py| {
         let python_files_path = python_env::get_python_files_path()
             .map_err(|e| format!("Failed to get python files path: {}", e))?;
+        let venv_site = python_env::get_venv_site_packages_path()
+            .map_err(|e| format!("Failed to get venv site-packages path: {}", e))?;
         let path_setup = format!(
             r#"
 import sys
 import os
 if r'{0}' not in sys.path:
     sys.path.insert(0, r'{0}')
+if r'{1}' not in sys.path:
+    sys.path.insert(0, r'{1}')
 "#,
-            python_files_path.to_string_lossy()
+            python_files_path.to_string_lossy(),
+            venv_site.to_string_lossy()
         );
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
@@ -126,14 +131,19 @@ pub fn detect_faces_with_angle(image: &Image) -> Result<Vec<(Rect, f32)>, String
     Python::with_gil(|py| {
         let python_files_path = python_env::get_python_files_path()
             .map_err(|e| format!("Failed to get python files path: {}", e))?;
+        let venv_site = python_env::get_venv_site_packages_path()
+            .map_err(|e| format!("Failed to get venv site-packages path: {}", e))?;
         let path_setup = format!(
             r#"
 import sys
 import os
+if r'{1}' not in sys.path:
+    sys.path.insert(0, r'{1}')
 if r'{0}' not in sys.path:
     sys.path.insert(0, r'{0}')
 "#,
-            python_files_path.to_string_lossy()
+            python_files_path.to_string_lossy(),
+            venv_site.to_string_lossy()
         );
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
@@ -229,12 +239,18 @@ pub fn initialize_face_recognition() -> Result<(), String> {
     Python::with_gil(|py| {
         let python_files_path = python_env::get_python_files_path()
             .map_err(|e| format!("Failed to get python files path: {}", e))?;
+        // 优先把 venv 的 site-packages 放到 sys.path 前面，确保导入 venv 内的 onnxruntime 变体
+        let venv_site = python_env::get_venv_site_packages_path()
+            .map_err(|e| format!("Failed to get venv site-packages path: {}", e))?;
         let path_setup = format!(
             r#"
 import sys, os
+if r'{venv}' not in sys.path:
+    sys.path.insert(0, r'{venv}')
 sys.path.insert(0, r'{}')
 "#,
-            python_files_path.to_string_lossy()
+            python_files_path.to_string_lossy(),
+            venv = venv_site.to_string_lossy()
         );
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;
@@ -300,12 +316,17 @@ pub fn preload_targets_from_faces_dir(_app_handle: &tauri::AppHandle) -> Result<
     Python::with_gil(|py| {
         let python_files_path = python_env::get_python_files_path()
             .map_err(|e| format!("Failed to get python files path: {}", e))?;
+        let venv_site = python_env::get_venv_site_packages_path()
+            .map_err(|e| format!("Failed to get venv site-packages path: {}", e))?;
         let path_setup = format!(
             r#"
 import sys, os
 sys.path.insert(0, r'{}')
+if r'{venv}' not in sys.path:
+    sys.path.insert(0, r'{venv}')
 "#,
-            python_files_path.to_string_lossy()
+            python_files_path.to_string_lossy(),
+            venv = venv_site.to_string_lossy()
         );
         py.run(&path_setup, None, None)
             .map_err(|e| format!("Failed to setup Python path: {}", e))?;

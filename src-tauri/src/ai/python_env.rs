@@ -163,22 +163,24 @@ impl PythonEnvManager {
         let python_path = self.get_python_executable_from_venv(venv_path)?;
         self.ensure_pip_in_venv(venv_path)?;
 
-        // 尝试 CUDA 版
+        // 尝试 CUDA 版（优先），若安装后即可识别 provider，且 CUDA 运行库齐备（含 cuDNN 9），则直接使用
         let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(&python_path, "CUDAExecutionProvider")? {
             if self.python_can_use_cuda(&python_path)? {
                 info!("Using CUDAExecutionProvider in venv");
                 return Ok(());
             } else {
-                info!("CUDAExecutionProvider available but CUDA runtime DLLs not found; falling back to DML/CPU");
+                warn!("CUDAExecutionProvider detected but CUDA runtime/cuDNN not available; falling back to DirectML");
+                if let Some(ref handle) = self.app_handle {
+                    let _ = handle.emit("python-installation-warning", "检测到缺少 CUDA/cuDNN（如 cudnn64_9.dll），将临时使用 DirectML。安装好 cuDNN 后会自动优先使用 CUDA。");
+                }
             }
         }
 
-        // 回退到 DML 版（Windows 下可用）
-        let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        // 回退到 DML 版（Windows 下可用）。此处不强制卸载 GPU 包，以便你装好 cuDNN 后下次启动仍可直接切回 CUDA
         let _ = new_cmd(&python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(&python_path, "DmlExecutionProvider")? {
-            info!("Using DmlExecutionProvider in venv");
+            info!("Using DmlExecutionProvider in venv (temporary fallback)");
             return Ok(());
         }
 
@@ -190,21 +192,23 @@ impl PythonEnvManager {
 
     // 在系统 Python 内自动安装最优 ORT 变体（CUDA→DML→CPU）
     fn auto_install_onnxruntime_in_system_python(&self, python_path: &Path) -> Result<(), String> {
-        // CUDA 版
+        // CUDA 版（优先），若安装后即可识别 provider，且 CUDA 运行库齐备（含 cuDNN 9），则直接使用
         let _ = new_cmd(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-gpu>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(python_path, "CUDAExecutionProvider")? {
             if self.python_can_use_cuda(python_path)? {
                 info!("Using CUDAExecutionProvider in system python");
                 return Ok(());
             } else {
-                info!("CUDAExecutionProvider available but CUDA runtime DLLs not found in system python; falling back to DML/CPU");
+                warn!("CUDAExecutionProvider detected but CUDA runtime/cuDNN not available in system python; falling back to DirectML");
+                if let Some(ref handle) = self.app_handle {
+                    let _ = handle.emit("python-installation-warning", "检测到缺少 CUDA/cuDNN（如 cudnn64_9.dll），将临时使用 DirectML。安装好 cuDNN 后会自动优先使用 CUDA。");
+                }
             }
         }
-        // DML 版
-        let _ = new_cmd(python_path).arg("-m").arg("pip").arg("uninstall").arg("-y").arg("onnxruntime-gpu").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        // DML 版（不卸载 GPU 包，便于后续自动切回 CUDA）
         let _ = new_cmd(python_path).arg("-m").arg("pip").arg("install").arg("-U").arg("onnxruntime-directml>=1.16.3").stdout(Stdio::piped()).stderr(Stdio::piped()).output();
         if self.python_has_provider(python_path, "DmlExecutionProvider")? {
-            info!("Using DmlExecutionProvider in system python");
+            info!("Using DmlExecutionProvider in system python (temporary fallback)");
             return Ok(());
         }
         // CPU 版
@@ -584,6 +588,75 @@ print('True' if ok(names_12) or ok(names_11) else 'False')"#;
             }
         }
         
+        // 当配置要求固定 provider（cpu/cuda/dml）时，强制校验对应 ExecutionProvider 是否可用
+        let provider_pref = crate::config::get_config()
+            .and_then(|c| c.face)
+            .and_then(|f| f.recognition.provider)
+            .unwrap_or_else(|| "auto".to_string())
+            .to_lowercase();
+        if provider_pref != "auto" {
+            let expected_provider = match provider_pref.as_str() {
+                "cuda" => Some("CUDAExecutionProvider"),
+                "dml" => Some("DmlExecutionProvider"),
+                "cpu" => Some("CPUExecutionProvider"),
+                _ => None,
+            };
+            if let Some(provider_name) = expected_provider {
+                match self.python_has_provider(&python_path, provider_name) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!(
+                            "Expected provider '{}' not available in venv for preference '{}'",
+                            provider_name,
+                            provider_pref
+                        );
+                        return Ok(false);
+                    }
+                    Err(e) => {
+                        warn!("Failed to check provider '{}': {}", provider_name, e);
+                        return Ok(false);
+                    }
+                }
+            }
+        } else {
+            // auto: 优先使用 CUDA
+            // 1) 若 venv 未安装 onnxruntime-gpu 发行包，则要求安装（返回未就绪触发安装阶段）
+            let code = r#"import sys
+try:
+    import importlib.metadata as md
+    md.version('onnxruntime-gpu')
+    print('True')
+except Exception:
+    print('False')
+"#;
+            let out = new_cmd(&python_path)
+                .arg("-c").arg(code)
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+            let gpu_installed = match out {
+                Ok(o) if o.status.success() => {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    s == "True"
+                }
+                _ => false,
+            };
+            if !gpu_installed {
+                warn!("Auto mode prefers CUDA; onnxruntime-gpu not installed in venv; will reinstall to try GPU variant");
+                return Ok(false);
+            }
+            // 2) 若包已安装但 provider 不可用，也返回未就绪以重试安装（可能被其他变体覆盖）
+            match self.python_has_provider(&python_path, "CUDAExecutionProvider") {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!("onnxruntime-gpu installed but CUDAExecutionProvider not reported; will reinstall to ensure GPU variant takes precedence");
+                    return Ok(false);
+                }
+                Err(e) => {
+                    warn!("Failed to query CUDAExecutionProvider in auto mode: {}", e);
+                    return Ok(false);
+                }
+            }
+        }
+        
         info!("All required packages verified successfully");
         Ok(true)
     }
@@ -948,6 +1021,41 @@ pub fn is_python_ready() -> bool {
 pub fn get_python_files_path() -> Result<PathBuf, String> {
     if let Some(m) = PYTHON_ENV_MANAGER.get() {
         m.get_python_files_path()
+    } else {
+        Err("Python environment not initialized".to_string())
+    }
+}
+
+/// 获取虚拟环境的 site-packages 路径，供嵌入式 Python 注入 sys.path 使用
+pub fn get_venv_site_packages_path() -> Result<PathBuf, String> {
+    if let Some(m) = PYTHON_ENV_MANAGER.get() {
+        if let Some(venv) = &m.virtual_env_path {
+            #[cfg(target_os = "windows")]
+            {
+                let p = venv.join("Lib").join("site-packages");
+                if p.exists() {
+                    return Ok(p);
+                }
+                return Err("site-packages not found in venv (Windows)".to_string());
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let candidates = [
+                    "lib/python3.12/site-packages",
+                    "lib/python3.11/site-packages",
+                    "lib/python3.10/site-packages",
+                    "lib/python3.9/site-packages",
+                    "lib/python3/site-packages",
+                ];
+                for rel in candidates {
+                    let p = venv.join(rel);
+                    if p.exists() { return Ok(p); }
+                }
+                Err("site-packages not found in venv (Unix)".to_string())
+            }
+        } else {
+            Err("Virtual environment path not set".to_string())
+        }
     } else {
         Err("Python environment not initialized".to_string())
     }

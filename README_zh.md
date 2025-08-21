@@ -30,6 +30,8 @@
 - 覆盖层（Overlay）在独立窗口渲染马赛克，不改动原桌面画面
 - 可自定义 `mosaic_style`（CSS 字符串）实现不同样式的遮罩
 
+![app](./docs/app.png)
+
 ![demo](./docs/demo.gif)
 
 ---
@@ -62,6 +64,10 @@
 - 后续启动会先验证 venv 依赖是否齐全，齐全则跳过安装
 
 > 环境：Windows 10/11 x64；可用 GPU 则优先 CUDA，其次 DirectML，否则 CPU。
+>
+> **可选的 GPU 加速**：如果你想要 CUDA 加速以获得更好的性能，需要安装 NVIDIA CUDA 12.x 和 NVIDIA cuDNN 9。当前的 onnxruntime-gpu 版本（>=1.16）与 Windows 下的 CUDA 12.x + cuDNN 9 兼容。
+>
+> ⚠️ **注意**：CUDA 13.x 与当前的 onnxruntime-gpu 版本不兼容。
 
 #### 方式二：源码编译运行
 
@@ -81,6 +87,20 @@ cargo build
 cd ..
 npm run tauri dev
 ```
+
+---
+
+### CUDA/cuDNN 配置（Windows）
+
+**可选步骤**（仅当你想要 CUDA 加速时）：
+
+1. **安装 NVIDIA CUDA 12.x**（不支持 CUDA 13.x）- 这提供了所需的运行库
+2. 更新至最新的 NVIDIA GameReady/Studio 驱动。
+3. 安装 NVIDIA cuDNN 9（Windows x64）。安装后确保应用能找到 `cudnn64_9.dll`，可选其一：
+   - 将 cuDNN 的 `bin` 目录加入系统 `PATH`
+   - 或将该 DLL 复制到 venv 的 ONNX Runtime 目录：
+     - `%APPDATA%\screen-ghost\python_env\Lib\site-packages\onnxruntime\capi\cudnn64_9.dll`
+3. 重启应用。日志应显示 `Applied providers: ['CUDAExecutionProvider', 'CPUExecutionProvider']`。
 
 ---
 
@@ -141,4 +161,32 @@ log_level = "debug"
 - 每次启动的初始化行为
   - 优先从 exe 同级目录的 `python/` 复制脚本到 `python_files/`
   - Python 依赖（numpy/opencv/onnxruntime/insightface）会在隔离的 venv 中安装；`provider=auto` 会自动选择 CUDA→DML→CPU 的最佳 ORT 变体。
+
+---
+
+### 常见问题与解决方案
+
+#### CUDA 版本兼容性问题
+
+**问题**：许多用户尝试使用 CUDA 13.x 时遇到错误。
+
+**根本原因**：当前的 onnxruntime-gpu 版本（>=1.16）专门为 NVIDIA CUDA 12.x 和 NVIDIA cuDNN 9 构建。CUDA 13.x 引入了不兼容的破坏性更改。
+
+**解决方案**：
+1. 从 NVIDIA 官网安装 NVIDIA CUDA 12.x（不是 13.x）
+2. 安装 Windows x64 的 NVIDIA cuDNN 9
+3. 确保你的 NVIDIA 驱动是最新的
+
+**验证**：安装后，应用应自动检测 CUDA 12.x 运行库并在可用提供者中显示 `CUDAExecutionProvider`。
+
+#### 缺少 cuDNN 9 错误
+
+**问题**：应用显示缺少 CUDA/cuDNN 的警告并回退到 DirectML。
+
+**解决方案**：
+1. 从 NVIDIA 开发者网站下载 Windows x64 的 NVIDIA cuDNN 9
+2. 解压并将 `bin` 目录添加到系统 PATH，或者
+3. 将 `cudnn64_9.dll` 复制到应用的 ONNX Runtime 目录
+
+**注意**：正确安装 cuDNN 9 后，应用会自动切换回 CUDA。
 
